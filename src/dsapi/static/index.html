@@ -25,7 +25,7 @@ main { display: grid; grid-template-columns: 320px 1fr; gap: 16px; padding: 16px
 section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 16px; min-width: 0; }
 h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
 label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 3px; }
-input, textarea { width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+input, textarea, select { width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
 textarea { font-family: var(--mono); font-size: 12px; min-height: 220px; resize: vertical; }
 .row { display: flex; gap: 8px; }
 .row > * { flex: 1; min-width: 0; }
@@ -93,12 +93,14 @@ th { color: var(--muted); font-weight: 500; }
         <div><label>开始（秒，可选）</label><input id="start" inputmode="decimal"></div>
         <div><label>结束（秒，可选）</label><input id="end" inputmode="decimal"></div>
       </div>
+      <label for="selection">自动选段（未填写时间时）</label>
+      <select id="selection"><option value="random">随机选择连续歌词</option><option value="chorus">选择评分最高的连续歌词</option></select>
       <div class="checks">
         <label><input type="checkbox" id="mMimic" checked>模仿模式</label>
         <label><input type="checkbox" id="mScore" checked>乐谱模式</label>
       </div>
       <div style="margin-top:12px"><button id="submit">提交</button></div>
-      <p class="muted" style="font-size:12px;margin:8px 0 0">不填时间窗时按 LRC 自动定位副歌。同一时间只跑一个任务，其余排队。</p>
+      <p class="muted" style="font-size:12px;margin:8px 0 0">先选连续歌词，再按时间戳切片；自动保留中文、英文和日文。同一时间只跑一个任务，其余排队。</p>
     </section>
     <section>
       <div class="head"><h2>最近任务</h2><button class="ghost" id="refresh">刷新</button></div>
@@ -125,11 +127,24 @@ let current = null, timer = null;
 let elapsedClock = null;
 const deleting = new Set();
 let taskListVersion = 0;
+let keyVersion = 0;
 
 const keyStore = { get() { try { return localStorage.getItem("dsapi.key") || ""; } catch { return ""; } },
                    set(v) { try { localStorage.setItem("dsapi.key", v); } catch {} } };
 $("apikey").value = keyStore.get();
-$("apikey").addEventListener("change", (e) => { keyStore.set(e.target.value); loadTasks(); loadRuntime(); });
+$("apikey").addEventListener("change", (e) => {
+  keyStore.set(e.target.value);
+  ++keyVersion;
+  current = null;
+  clearTimeout(timer);
+  elapsedClock = null;
+  $("detail").querySelectorAll("audio").forEach(player => player.pause());
+  $("detail").innerHTML = '<p class="muted">请选择或提交一个任务。</p>';
+  delete $("detail").dataset.taskId;
+  $("tasks").replaceChildren();
+  loadTasks();
+  loadRuntime();
+});
 
 function withKey(url) {
   const k = $("apikey").value;
@@ -180,14 +195,16 @@ document.querySelectorAll('input[name="srcMode"]').forEach((r) => r.onchange = (
 });
 
 $("submit").onclick = async () => {
+  const version = keyVersion;
   const modes = [];
   if ($("mMimic").checked) modes.push("mimic");
   if ($("mScore").checked) modes.push("score");
   const s = parseFloat($("start").value), en = parseFloat($("end").value);
   const windowSet = !isNaN(s) && !isNaN(en);
+  if (isNaN(s) !== isNaN(en)) return alert("请同时填写开始和结束时间，或都留空");
   let req;
   if (srcMode() === "id") {
-    const body = { song_id: $("songId").value.trim(), modes };
+    const body = { song_id: $("songId").value.trim(), modes, selection: $("selection").value };
     if (!body.song_id) return alert("请填写歌曲 ID");
     if (windowSet) Object.assign(body, { start: s, end: en });
     req = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
@@ -200,6 +217,7 @@ $("submit").onclick = async () => {
     if ($("lrcFile").files[0]) form.append("lrc_file", $("lrcFile").files[0]);
     else form.append("lrc_text", $("lrcText").value);
     form.append("modes", modes.join(","));
+    form.append("selection", $("selection").value);
     if (windowSet) { form.append("start", s); form.append("end", en); }
     req = { method: "POST", body: form };
   }
@@ -207,10 +225,12 @@ $("submit").onclick = async () => {
   try {
     const path = srcMode() === "id" ? "/release_task" : "/release_task_upload";
     const { task_id } = await (await api(path, req)).json();
+    if (version !== keyVersion) return;
     await loadTasks();
+    if (version !== keyVersion) return;
     select(task_id);
-  } catch (e) { alert(e.message); }
-  $("submit").disabled = false;
+  } catch (e) { if (version === keyVersion) alert(e.message); }
+  finally { $("submit").disabled = false; }
 };
 
 async function loadTasks() {
@@ -260,10 +280,11 @@ function select(id) {
 
 async function poll() {
   const id = current;
+  const version = keyVersion;
   let st;
   try { st = await (await api(`/query_result?task_id=${id}`)).json(); }
   catch (e) {
-    if (id !== current) return;
+    if (id !== current || version !== keyVersion) return;
     // A transient polling error must not interrupt audio that is already playing.
     if ($("detail").dataset.taskId !== id) {
       $("detail").textContent = e.message;
@@ -272,7 +293,7 @@ async function poll() {
     timer = setTimeout(poll, 2000);
     return;
   }
-  if (id !== current) return;
+  if (id !== current || version !== keyVersion) return;
   renderDetail(st);
   if (st.status === "queued" || st.status === "running") timer = setTimeout(poll, 2000);
   else loadTasks();

@@ -14,6 +14,7 @@ def job_env(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline.settings, "WORK", tmp_path)
     monkeypatch.setattr(api, "_jobs", {})
     monkeypatch.setattr(api, "API_KEY", "")
+    monkeypatch.setattr(api, "API_KEYS", {})
     clock = SimpleNamespace(now=100.0)
     timer = SimpleNamespace(time=lambda: clock.now, perf_counter=lambda: clock.now)
     monkeypatch.setattr(pipeline, "time", timer)

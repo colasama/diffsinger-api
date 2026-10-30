@@ -32,7 +32,8 @@ def runtime_info():
 
 def main(ckpt: str, folder: str, dictionary: str, out_json: str, language: str):
     inference = load_models(ckpt)
-    g2p = DictionaryG2P(language if inference.vocab['language_prefix'] else None, dictionary)
+    g2p = DictionaryG2P(language if inference.vocab['language_prefix'] and language != 'mixed' else None,
+                       dictionary)
     inference.dataset, inference.predictions = [], []
     try:
         for wav in sorted(pathlib.Path(folder).glob('*.wav')):
@@ -43,7 +44,7 @@ def main(ckpt: str, folder: str, dictionary: str, out_json: str, language: str):
             ph_seq, word_seq, mapping = g2p(' '.join(units))
             # This checkpoint merges Japanese closure with language-neutral silence.
             # Keep it inside its mora so its boundary still maps back to ja/cl.
-            if language == 'ja':
+            if language in ('ja', 'mixed'):
                 ph_seq = ['cl' if p == 'ja/cl' else p for p in ph_seq]
             inference.dataset.append((wav, ph_seq, word_seq, mapping))
         if not inference.dataset:

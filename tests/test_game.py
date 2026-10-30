@@ -32,7 +32,8 @@ def test_regions_preserve_vowel_boundaries_and_mimic_context(tmp_path, monkeypat
     assert tools.extract_game_notes(tmp_path/"input.wav", tmp_path, [phrase], "ja") == [{"midi": 60}]
 
 
-def test_absolute_offsets_rests_padding_and_sampling_schedule():
+@pytest.mark.parametrize('language,per_region', [('zh', False), ('mixed', True)])
+def test_absolute_offsets_rests_padding_and_sampling_schedule(language, per_region):
     calls = []
     mask = np.ones((1, 100), bool)
     known = np.zeros((1, 100), bool)
@@ -56,7 +57,8 @@ def test_absolute_offsets_rests_padding_and_sampling_schedule():
     funcs = dict(encoder=encode,dur2bd=dur2bd,segmenter=segment,bd2dur=bd2dur,estimator=estimate)
     sessions = {name: SimpleNamespace(run=lambda _, inputs, fn=fn: fn(inputs)) for name,fn in funcs.items()}
     notes = transcribe(np.zeros(400), {"samplerate":100,"languages":{"zh":4}}, sessions,
-                       [{"start":2.,"end":3.,"boundaries":[1.,2.25,2.25,2.75,4.]}], "zh", 8)
+                       [{"start":2.,"end":3.,"boundaries":[1.,2.25,2.25,2.75,4.],
+                         **({'language':'zh'} if per_region else {})}], language, 8)
     assert notes == [{"start":2.,"dur":.25,"midi":60.,"rest":True},
                      {"start":2.25,"dur":.75,"midi":72.,"rest":False}]
     assert calls == [i/8 for i in range(8)]

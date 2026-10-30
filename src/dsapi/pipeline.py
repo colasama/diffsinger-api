@@ -1,4 +1,4 @@
-"""End-to-end job: song -> chorus clip -> lead vocal -> score -> re-sung audio.
+"""End-to-end job: song -> lyric-selected clip -> lead vocal -> score -> re-sung audio.
 
 Every stage writes into work/<task_id>/ and records its timing in job.json so
 a failed run shows exactly where it stopped.
@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import audio, extract, jianpu, lrc, settings, sources, tools
+from . import audio, extract, jianpu, lrc, selection, settings, sources, tools
 from .score import Phrase, render_mimic, render_score
 from .voicebank import Voicebank
 
@@ -28,6 +28,9 @@ class JobSpec:
     start: float | None = None  # clip window override (seconds in the song)
     end: float | None = None
     modes: list[str] = field(default_factory=lambda: ["mimic", "score"])
+    selection: str = "random"
+    seed: int | None = None
+    lyric_query: str | None = None
 
 
 @dataclass
@@ -41,6 +44,7 @@ class JobState:
     finished_at: float | None = None
     song: dict | None = None
     window: list[float] | None = None
+    selection: dict | None = None
     lines: list[dict] = field(default_factory=list)
     alignment: list[dict] = field(default_factory=list)
     note_extraction: dict | None = None
@@ -49,6 +53,7 @@ class JobState:
     jianpu: str | None = None
     outputs: dict[str, str] = field(default_factory=dict)
     error: str | None = None
+    owner_id: str | None = None
 
 
 _vb: Voicebank | None = None
@@ -62,14 +67,18 @@ def voicebank() -> Voicebank:
 
 
 class Job:
-    def __init__(self, task_id: str, spec: JobSpec):
+    def __init__(self, task_id: str, spec: JobSpec, *, owner_id: str | None = None):
         self.dir = settings.WORK / task_id
         self.dir.mkdir(parents=True, exist_ok=True)
-        self.state = JobState(task_id, spec)
+        self.state = JobState(task_id, spec, owner_id=owner_id)
         self.save()
 
     def save(self) -> None:
-        (self.dir / "job.json").write_text(json.dumps(asdict(self.state), ensure_ascii=False, indent=2))
+        # Readers must never see a partially written state/ownership record.
+        path = self.dir / "job.json"
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(asdict(self.state), ensure_ascii=False, indent=2))
+        temporary.replace(path)
 
     def stage(self, name: str):
         job = self
@@ -122,24 +131,17 @@ class Job:
 
         with self.stage("select"):
             lines = lrc.parse(lrc_text, duration)
-            if spec.start is not None and spec.end is not None:
-                chosen = [ln for ln in lines if ln.start >= spec.start - 0.5 and ln.end <= spec.end + 1.0]
-            else:
-                i, j = lrc.pick_chorus(lines)
-                chosen = lines[i:j]
-            if not chosen:
-                raise RuntimeError("no singable lyric lines in the window")
-            # LRC stamps can run ~1s late; leave room before the first line.
-            start = max(0.0, chosen[0].start - 1.5)
-            end = min(duration, chosen[-1].end + 1.0, start + MAX_CLIP)
-            chosen = [ln for ln in chosen if ln.start < end]
+            selected = selection.select(lines, duration, start=spec.start, end=spec.end,
+                                        strategy=spec.selection, seed=spec.seed, max_clip=MAX_CLIP,
+                                        lyric_query=spec.lyric_query)
+            chosen, before, after = selected.lines, selected.before, selected.after
+            start, end = selected.start, selected.end
+            st.selection = selected.metadata()
+            if selected.strategy == "random":
+                spec.seed = selected.seed
             st.window = [round(start, 2), round(end, 2)]
-            st.lines = [{"start": ln.start, "end": ln.end, "text": ln.text} for ln in chosen]
-            # Neighbouring lines bleed into the clip; aligning them as context keeps
-            # their audio from being forced onto the first/last chosen syllables.
-            k0, k1 = lines.index(chosen[0]), lines.index(chosen[-1])
-            before = [ln for ln in lines[max(0, k0 - 1):k0] if ln.end > start - 0.5]
-            after = [ln for ln in lines[k1 + 1:k1 + 2] if ln.start < end + 0.5]
+            st.lines = [{"start": ln.start, "end": ln.end, "text": ln.text,
+                         "languages": sorted({lang for _, _, lang in ln.routed_units})} for ln in chosen]
             clip = audio.cut(src, d / "clip.wav", start, end)
 
         with self.stage("separate"):

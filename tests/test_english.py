@@ -13,8 +13,8 @@ def test_english_detection_contractions_and_distinct_chorus_lines(monkeypatch):
     monkeypatch.delenv('DSAPI_EXPERIMENTAL_JA', raising=False)
     lines = lrc.parse("[00:00]作词: Someone\n[00:01]Hello, don't go\n"
                       "[00:05]You’re still here\n[00:09]空へ\n[00:12]Hello, don't go", 18)
-    assert len(lines) == 3
-    assert all(ln.lang == 'en' for ln in lines)
+    assert len(lines) == 4
+    assert [ln.lang for ln in lines] == ['en', 'en', 'ja', 'en']
     assert lines[0].units == [('Hello', 'hello'), ("don't", "don't"), ('go', 'go')]
     assert lines[1].units[0] == ("You're", "you're")
     assert lrc._norm(lines[0].text) != lrc._norm(lines[1].text)

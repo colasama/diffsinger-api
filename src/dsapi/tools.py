@@ -136,7 +136,8 @@ def extract_f0(wav: Path, out_dir: Path) -> tuple[np.ndarray, np.ndarray]:
 
 def extract_game_notes(wav: Path, out_dir: Path, phrases: list, lang: str) -> list[dict]:
     regions = [{"start": p.phones[0][1], "end": p.phones[-1][2],
-                "boundaries": [t for s in p.syllables for t in (s.start, s.end)]} for p in phrases]
+                "boundaries": [t for s in p.syllables for t in (s.start, s.end)],
+                **({"language": p.syllables[0].lang} if lang == "mixed" else {})} for p in phrases]
     regions_path, output = out_dir / "game_regions.json", out_dir / "notes.json"
     regions_path.write_text(json.dumps(regions))
     _run(".", "game_runner.py", str(settings.GAME_MODEL.resolve()), str(wav.resolve()),
@@ -152,7 +153,11 @@ def alignment_backend(lang: str = "zh") -> str:
         if settings.JA_ALIGNER not in ("hubertfa", "sofa"):
             raise ValueError("DSAPI_JA_ALIGNER must be hubertfa or sofa")
         return settings.JA_ALIGNER
-    return "hubertfa" if lang == "en" else settings.ALIGNER if lang == "zh" else "sofa"
+    if lang in ("en", "mixed"):
+        return "hubertfa"
+    if lang == "zh":
+        return settings.ALIGNER
+    raise ValueError(f"Unsupported alignment language: {lang}")
 
 
 def align(folder: Path, out_dir: Path, ckpt: Path | None = None, dictionary: Path | None = None,
@@ -170,6 +175,8 @@ def align(folder: Path, out_dir: Path, ckpt: Path | None = None, dictionary: Pat
         dictionaries = {"en": settings.HUBERTFA_MODEL.parent / "ds_cmudict-07b.txt",
                         "ja": settings.HUBERTFA_MODEL.parent / "japanese_dict_full.txt",
                         "zh": settings.HUBERTFA_DICT}
+        if dictionary is None and lang == "mixed":
+            raise ValueError("Mixed-language alignment requires a phoneme-prefixed dictionary")
         dictionary = dictionary or dictionaries[lang]
         _run("HubertFA", "hubertfa_runner.py", str(Path(ckpt).resolve()), str(folder.resolve()),
              str(Path(dictionary).resolve()), str(out_json.resolve()), lang, log=out_dir / "hubertfa.log")

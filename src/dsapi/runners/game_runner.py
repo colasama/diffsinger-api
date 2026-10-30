@@ -29,6 +29,9 @@ def transcribe(waveform, config, sessions, regions, language, steps):
     sr = config["samplerate"]
     notes = []
     for region in regions:
+        region_language = region.get("language", language)
+        if region_language not in config["languages"]:
+            raise ValueError(f"Unsupported GAME language: {region_language}")
         a = max(0, round(region["start"] * sr))
         b = min(len(waveform), round(region["end"] * sr))
         if b <= a:
@@ -44,7 +47,7 @@ def transcribe(waveform, config, sessions, regions, language, steps):
         previous = known
         for i in range(steps):
             previous = sessions["segmenter"].run(None, {
-                "x_seg": xs, "language": np.array([config["languages"].get(language, 0)], np.int64),
+                "x_seg": xs, "language": np.array([config["languages"][region_language]], np.int64),
                 "known_boundaries": known, "prev_boundaries": previous,
                 "t": np.array([i / steps], np.float32), "maskT": mask,
                 "threshold": np.array(.2, np.float32), "radius": np.array(2, np.int64)})[0]
@@ -74,5 +77,6 @@ def main(root: str, wav: str, regions_json: str, output: str, language: str, ste
     Path(output).write_text(json.dumps({
         "backend": "game-medium", "version": "1.0.3", "steps": int(steps),
         "language": language, "word_boundaries": True,
+        "languages": sorted({region.get("language", language) for region in regions}),
         "sample_rate": config["samplerate"], "timestep": config["timestep"],
         "providers": sessions["encoder"].get_providers(), "notes": notes}))

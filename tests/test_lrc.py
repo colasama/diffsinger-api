@@ -97,3 +97,84 @@ def test_english_instrumental_labels_are_not_lyrics():
     assert len(lines) == 2
     assert all(line.lang == "en" for line in lines)
     assert lrc.pick_chorus(lines) == (0, 2)
+
+
+def test_parse_colon_fractions_mixed_with_standard_timestamps():
+    lines = lrc.parse("[00:00.00]作词：某人\n"
+                      "[00:12:95][01:12:950]空を見上げて\n"
+                      "[00:15.520]風と歌おう\n"
+                      "[01:15:52]風と歌おう\n"
+                      "[01:60:10]不合法时间\n[02:00:00]超出歌曲", 120)
+    assert [line.start for line in lines] == pytest.approx([12.95, 15.52, 72.95, 75.52])
+    assert lines[0].end == pytest.approx(15.52)
+    assert all(line.lang == "ja" and line.end > line.start for line in lines)
+    assert all("[" not in line.text and ":" not in line.text for line in lines)
+    i, j = lrc.pick_random(lines, seed=7)
+    assert j > i
+
+
+def test_equivalent_colon_and_dot_timestamps_are_deduplicated():
+    lines = lrc.parse("[00:12:95]空を見上げて\n"
+                      "[00:12.950]抬头看天空\n[00:15:52]風と歌おう", 20)
+    assert [line.text for line in lines] == ["空を見上げて", "風と歌おう"]
+    assert lines[0].end == pytest.approx(15.52)
+
+
+@pytest.mark.parametrize("stamp, expected", [
+    ("[0:1]", 1), ("[00:01.5]", 1.5), ("[00:01,125]", 1.125),
+    ("[00:01:125]", 1.125), ("[ 00 : 01 . 125 ]", 1.125),
+    ("［００：０１．１２５］", 1.125), ("【00：01，125】", 1.125),
+    ("[01:02:03.125]", 3723.125), ("[01:02:03,125]", 3723.125),
+    ("[123:01.125]", 7381.125),
+])
+def test_timestamp_variants_preserve_lyric_text(stamp, expected):
+    lines = lrc.parse("\ufeff" + stamp + "風とＡＢＣを歌おう\r\n", 8000)
+    assert len(lines) == 1
+    assert lines[0].start == pytest.approx(expected)
+    assert lines[0].text == "風とＡＢＣを歌おう"
+
+
+@pytest.mark.parametrize("tag, expected", [
+    ("[offset:+500]", .5), ("[offset:-500]", 1.5),
+    ("［ offset ： +500 ］", .5), ("[offset:bad]", 1),
+    ("[offset:100][offset:-250]", 1.25),
+])
+def test_offset_is_global_and_last_valid_value_wins(tag, expected):
+    lines = lrc.parse("[00:01]迎着风\n" + tag, 10)
+    assert lines[0].start == pytest.approx(expected)
+
+
+def test_offset_filters_bounds_after_adjustment_and_shifts_empty_boundaries():
+    lines = lrc.parse("[00:00.1]天空\n[00:01]迎着风\n[00:02]\n"
+                      "[00:10.1]歌唱\n[offset:500]", 10)
+    assert [line.start for line in lines] == pytest.approx([.5, 9.6])
+    assert [line.end for line in lines] == pytest.approx([1.5, 10])
+
+
+def test_enhanced_lyrics_keep_words_and_repeat_line_without_word_duplicates():
+    lines = lrc.parse("[00:01][00:11]<00:01>Hello <00:02,5>world<00:03>\n"
+                      "[00:21]迎<00:21:50>着风<00:23>", 30)
+    assert [(line.start, line.end, line.text) for line in lines] == [
+        (1, 3, "Hello world"), (11, 13, "Hello world"), (21, 23, "迎着风")]
+
+
+def test_word_only_and_inline_square_timestamps_do_not_repeat_whole_lyrics():
+    lines = lrc.parse("＜00：01＞空を＜00：02＞見て＜00：03＞\n"
+                      "[00:11]Hello [00:12]world", 20)
+    assert [line.start for line in lines] == [1, 11]
+    assert [line.text for line in lines] == ["空を見て", "Hello world"]
+    assert lines[0].end == 3
+
+
+def test_metadata_and_colons_in_actual_lyrics():
+    lines = lrc.parse("[ti:A song][ar:An artist]\n[00:01][lang:en]I say: hello\n"
+                      "[00:05]君は言う：歌おう\n[00:10]作词：某人\n"
+                      "[00:11]作詞：誰か\n[00:12]Vocals: Someone\n"
+                      "[00:15]Music is in the air", 20)
+    assert [line.text for line in lines] == ["I say: hello", "君は言う：歌おう", "Music is in the air"]
+
+
+@pytest.mark.parametrize("stamp", ["[00:60.1]", "[01:60:03.5]", "[00:-1]", "[00:NaN]",
+                                     "[00:01.2.3]", "[00:01:95.1]", "[00:01", "[offset:100]"])
+def test_malformed_timestamps_do_not_create_lyrics(stamp):
+    assert lrc.parse(stamp + "迎着风", 100) == []

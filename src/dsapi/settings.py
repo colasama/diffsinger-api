@@ -28,14 +28,14 @@ RMVPE_CKPT = Path(os.environ.get("DSAPI_RMVPE", MODELS / "rmvpe" / "model.pt"))
 SOFA_CKPT = MODELS / "sofa_mandarin" / "pretrained_mandarin_singing" / "v1.0.0_mandarin_singing.ckpt"
 SOFA_DICT = VENDOR / "SOFA" / "dictionary" / "opencpop-extension.txt"
 ALIGNER = os.environ.get("DSAPI_ALIGNER", "hubertfa").strip().lower()
-JA_ALIGNER = os.environ.get("DSAPI_JA_ALIGNER", "sofa").strip().lower()
+JA_ALIGNER = os.environ.get("DSAPI_JA_ALIGNER", "hubertfa").strip().lower()
 HUBERTFA_MODEL = MODELS / "hubertfa" / "1218_hfa_model_new_dict" / "model.onnx"
 HUBERTFA_DICT = HUBERTFA_MODEL.parent / "ds-zh-pinyin-lite.txt"
-# Japanese aligns with SOFA's multilingual model (opencpop-style phoneme set incl. "cl").
+# Optional legacy Japanese alignment model (opencpop-style phoneme set incl. "cl").
 SOFA_CKPT_MULTI = MODELS / "sofa_multilingual" / "pretrained_multilingual_singing" / "v1.0.0_multilingual_singing.ckpt"
 
 SEPARATOR_MODELS = MODELS / "separator"
-VOCALS_MODEL = os.environ.get("DSAPI_VOCALS_MODEL", "model_bs_roformer_ep_317_sdr_12.9755.ckpt")
+VOCALS_MODEL = os.environ.get("DSAPI_VOCALS_MODEL", "model_bs_roformer_ep_368_sdr_12.9628.ckpt")
 # Strips backing vocals from the separated vocal stem; empty disables it.
 KARAOKE_MODEL = os.environ.get("DSAPI_KARAOKE_MODEL", "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt")
 # Keep FP32; compile repeated transformer blocks once per cached model.

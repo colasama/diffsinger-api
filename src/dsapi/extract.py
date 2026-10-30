@@ -22,7 +22,7 @@ def sofa_words() -> set[str]:
     return {ln.split("\t", 1)[0] for ln in settings.SOFA_DICT.read_text(encoding="utf8").splitlines() if ln}
 
 
-def _in_clip(ln: Line, lo: float, hi: float) -> list[tuple[str, str]]:
+def _in_clip(ln: Line, lo: float, hi: float) -> list[tuple[str, str, str]]:
     """Units of a context line whose (evenly spread) time estimate falls in [lo, hi].
 
     Only the tail of the previous line / head of the next one is actually in the
@@ -30,7 +30,7 @@ def _in_clip(ln: Line, lo: float, hi: float) -> list[tuple[str, str]]:
     """
     n = len(ln.units)
     step = (ln.end - ln.start) / max(n, 1)
-    return [u for k, u in enumerate(ln.units) if lo <= ln.start + (k + 0.5) * step <= hi]
+    return [u for k, u in enumerate(ln.routed_units) if lo <= ln.start + (k + 0.5) * step <= hi]
 
 
 def write_segments(lines: list[Line], lead: np.ndarray, seg_dir: Path, vb: Voicebank,
@@ -43,42 +43,46 @@ def write_segments(lines: list[Line], lead: np.ndarray, seg_dir: Path, vb: Voice
     aligned too (their audio is in the clip) but tagged line -1 and dropped later.
     """
     seg_dir.mkdir(parents=True, exist_ok=True)
-    lang = lines[0].lang if lines else "zh"
+    clip_end = clip_start + len(lead) / settings.SAMPLE_RATE
+    tagged = ([(-1, _in_clip(ln, clip_start - 0.3, clip_end)) for ln in before]
+              + [(k, ln.routed_units) for k, ln in enumerate(lines)]
+              + [(-1, _in_clip(ln, clip_start, clip_end + 0.3)) for ln in after])
+    languages = sorted({lang for _, units in tagged for _, _, lang in units})
+    lang = languages[0] if len(languages) == 1 else "mixed"
     backend = tools.alignment_backend(lang)
     if lang == "zh":
         dictionary = settings.HUBERTFA_DICT if backend == "hubertfa" else settings.SOFA_DICT
         aligner_known = {ln.split("\t", 1)[0] for ln in dictionary.read_text(encoding="utf8").splitlines() if ln}
-        known = lambda g: g in aligner_known and vb.knows(g, "zh")  # noqa: E731
+        known = lambda g, language: g in aligner_known and vb.knows(g, language)  # noqa: E731
     else:
-        known = lambda g: vb.knows(g, lang)  # noqa: E731
-    chars, pinyin, line_of = [], [], []
-    clip_end = clip_start + len(lead) / settings.SAMPLE_RATE
-    tagged = ([(-1, _in_clip(ln, clip_start - 0.3, clip_end)) for ln in before]
-              + [(k, ln.units) for k, ln in enumerate(lines)]
-              + [(-1, _in_clip(ln, clip_start, clip_end + 0.3)) for ln in after])
+        known = lambda g, language: vb.knows(g, language)  # noqa: E731
+    chars, pinyin, line_of, word_units, word_langs = [], [], [], [], []
     for k, units in tagged:
-        for c, py in units:
-            if (lang == "en" or (lang == "ja" and backend == "hubertfa")) and not known(py):
-                language = "English" if lang == "en" else "Japanese"
+        for c, py, unit_lang in units:
+            if (lang in ("en", "mixed") or (lang == "ja" and backend == "hubertfa")) and not known(py, unit_lang):
+                language = {"en": "English", "ja": "Japanese", "zh": "Chinese"}[unit_lang]
                 raise ValueError(f"{language} word missing from voicebank dictionary: {py}")
-            if known(py):
+            if known(py, unit_lang):
                 chars.append(c)
-                pinyin.append(py)
+                pinyin.append(f"{unit_lang}:{py}" if lang == "mixed" else py)
                 line_of.append(k)
+                word_units.append(py)
+                word_langs.append(unit_lang)
     if not pinyin:
         return []
     audio.save(seg_dir / "clip.wav", lead)
     (seg_dir / "clip.lab").write_text(" ".join(pinyin), encoding="utf8")
-    if backend == "hubertfa" and lang in ("en", "ja"):
+    if backend == "hubertfa" and lang in ("en", "ja", "mixed"):
         ckpt, dictionary = settings.HUBERTFA_MODEL, seg_dir.parent / "hubertfa_dict.txt"
         vocab = json.loads((ckpt.parent / "vocab.json").read_text())["vocab"]
-        unknown = {p for u in pinyin for p in vb.g2p(u, lang)
+        pronunciations = {key: vb.g2p(u, language) for key, u, language in zip(pinyin, word_units, word_langs)}
+        unknown = {p for phones in pronunciations.values() for p in phones
                    if ("cl" if p == "ja/cl" else p) not in vocab}
         if unknown:
             raise ValueError(f"Phonemes missing from HubertFA {lang} vocabulary: {sorted(unknown)}")
         dictionary.write_text("".join(
-            f"{u}\t{' '.join(p.removeprefix(lang + '/') for p in vb.g2p(u, lang))}\n"
-            for u in sorted(set(pinyin))), encoding="utf8")
+            f"{key}\t{' '.join(p if lang == 'mixed' else p.removeprefix(lang + '/') for p in phones)}\n"
+            for key, phones in sorted(pronunciations.items())), encoding="utf8")
     elif lang == "zh":
         ckpt = settings.HUBERTFA_MODEL if backend == "hubertfa" else settings.SOFA_CKPT
     else:
@@ -88,10 +92,14 @@ def write_segments(lines: list[Line], lead: np.ndarray, seg_dir: Path, vb: Voice
         dictionary.write_text("".join(
             f"{u}\t{' '.join(japanese.sofa_phoneme(p) for p in vb.g2p(u, lang))}\n" for u in sorted(set(pinyin))),
             encoding="utf8")
-    meta = {"backend": backend, "lang": lang, "ckpt": str(ckpt), "dictionary": str(dictionary)}
+    meta = {"backend": backend, "lang": lang, "languages": languages,
+            "ckpt": str(ckpt), "dictionary": str(dictionary)}
     (seg_dir.parent / "align_meta.json").write_text(json.dumps(meta))
-    return [{"name": "clip", "offset": 0.0, "chars": chars, "pinyin": pinyin, "line_of": line_of,
+    segments = [{"name": "clip", "offset": 0.0, "chars": chars, "pinyin": pinyin, "line_of": line_of,
+             "word_units": word_units, "word_langs": word_langs,
              "texts": [ln.text for ln in lines], **meta}]
+    (seg_dir.parent / "segments.json").write_text(json.dumps(segments, ensure_ascii=False, indent=2))
+    return segments
 
 
 def _map_phones(vb: Voicebank, py: str, sofa: list[tuple[str, float, float]], lang: str = "zh"
@@ -136,11 +144,12 @@ def _syllable_notes(start: float, end: float, notes: list[dict], f0_midi: np.nda
     return [Note(a, b - a, m) for a, b, m in merged]
 
 
-def _split(spans: list[tuple[float, float]]) -> list[tuple[int, int]]:
+def _split(spans: list[tuple[float, float]], languages: list[str] | None = None) -> list[tuple[int, int]]:
     """Group syllable indices into phrases at breaths, capping phrase length."""
     groups, i = [], 0
     for j in range(1, len(spans) + 1):
-        if j == len(spans) or spans[j][0] - spans[j - 1][1] >= PHRASE_GAP:
+        if (j == len(spans) or spans[j][0] - spans[j - 1][1] >= PHRASE_GAP
+                or (languages is not None and languages[j] != languages[j - 1])):
             groups.append((i, j))
             i = j
     out = []
@@ -171,17 +180,19 @@ def build_phrases(vb: Voicebank, segs: list[dict], sofa: dict, notes: list[dict]
             continue
         all_phones = [(p, s + off, e + off) for p, s, e in res["phones"]]
 
+        units = seg.get("word_units", seg["pinyin"])
+        langs = seg.get("word_langs", [seg["lang"]] * len(words))
         word_phones, spans = [], []  # per syllable: mapped phones; (vowel onset, end)
-        for py, ws, we in words:
+        for i, (_, ws, we) in enumerate(words):
             sofa_ph = [x for x in all_phones if x[0] not in ("SP", "AP") and x[1] >= ws - 1e-4 and x[2] <= we + 1e-4]
-            mapped = _map_phones(vb, py, sofa_ph, seg["lang"])
+            mapped = _map_phones(vb, units[i], sofa_ph, langs[i])
             word_phones.append(mapped)
             spans.append((next((s for p, s, _ in mapped if vb.is_vowel(p)), ws), we))
         word_spans = [(ws, we) for _, ws, we in words]
 
         keep = [i for i, k in enumerate(seg["line_of"]) if k >= 0]
         first, last = keep[0], keep[-1] + 1
-        for a, b in _split(word_spans[first:last]):
+        for a, b in _split(word_spans[first:last], langs[first:last]):
             a, b = a + first, b + first
             # Context: up to HEAD of silence each side, never past the neighbours.
             lo = max(word_spans[a][0] - HEAD, word_spans[a - 1][1] if a else 0.0)
@@ -200,7 +211,7 @@ def build_phrases(vb: Voicebank, segs: list[dict], sofa: dict, notes: list[dict]
 
             syls = []
             for i in range(a, b):
-                if seg["lang"] == "en":
+                if langs[i] == "en":
                     from .english import phone_groups
 
                     mapped = word_phones[i]
@@ -213,17 +224,17 @@ def build_phrases(vb: Voicebank, segs: list[dict], sofa: dict, notes: list[dict]
                         if j + 1 == len(groups) and i + 1 < b and 0 <= spans[i + 1][0] - e < CONSONANT_GAP:
                             e = spans[i + 1][0]
                         syls.append(Syllable(seg["chars"][i] if j == 0 else "·",
-                                            f"{seg['pinyin'][i]}~{j}",
+                                            f"{units[i]}~{j}",
                                             _syllable_notes(s, e, notes, f0_midi), "en"))
                     continue
                 s, e = spans[i]
                 if i + 1 < b and 0 <= spans[i + 1][0] - e < CONSONANT_GAP:
                     e = spans[i + 1][0]  # the next consonant still belongs to this note
-                syls.append(Syllable(seg["chars"][i], seg["pinyin"][i], _syllable_notes(s, e, notes, f0_midi),
-                                     seg["lang"]))
+                syls.append(Syllable(seg["chars"][i], units[i], _syllable_notes(s, e, notes, f0_midi), langs[i]))
             phrases.append(Phrase(syls, phones=phones, f0_midi=f0_midi[int(round(lo * fps)):]))
             lines = sorted({seg["line_of"][i] for i in range(a, b)})
-            report.append({"line": (" " if seg["lang"] == "en" else "").join(seg["chars"][a:b]), "lrc_lines": [seg["texts"][k] for k in lines],
+            report.append({"line": (" " if langs[a] == "en" else "").join(seg["chars"][a:b]), "lrc_lines": [seg["texts"][k] for k in lines],
+                           "lang": langs[a],
                            "start": round(word_spans[a][0], 2), "backend": seg.get("backend", "sofa"),
                            "confidence": round(res["confidence"], 3) if res.get("confidence") is not None else None,
                            "syllables": len(syls), "notes": sum(len(x.notes) for x in syls)})

@@ -15,6 +15,51 @@ function silentWav() {
   return data;
 }
 
+test('switching API keys clears private details and ignores an old in-flight poll', { timeout: 30000 }, async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    const html = readFileSync(join(__dirname, '../src/dsapi/static/index.html'), 'utf8');
+    const state = { task_id: 'alice-task', status: 'done', spec: {}, timings: {},
+      outputs: { mimic: '/v1/audio?task_id=alice-task&kind=mimic' } };
+    let delayPoll = false, signal;
+    const stalled = new Promise(resolve => { signal = resolve; });
+    await page.addInitScript(() => localStorage.setItem('dsapi.key', 'alice-secret'));
+    await page.route('http://dsapi.test/**', route => {
+      const url = new URL(route.request().url());
+      if (url.pathname === '/ui/') return route.fulfill({ contentType: 'text/html', body: html });
+      if (url.pathname === '/tasks') return route.fulfill({ json: url.searchParams.get('key') === 'alice-secret'
+        ? [state] : [{ task_id: 'bob-task', status: 'queued' }] });
+      if (url.pathname === '/query_result') {
+        if (delayPoll) { signal(route); return; }
+        return route.fulfill({ json: state });
+      }
+      if (url.pathname === '/v1/audio') return route.fulfill({ contentType: 'audio/wav', body: silentWav() });
+      return route.fulfill({ status: 404 });
+    });
+    await page.goto('http://dsapi.test/ui/');
+    await page.locator('[data-id="alice-task"]').click();
+    await page.locator('#taskPlayers audio').waitFor();
+    await page.evaluate(async () => {
+      window.oldPlayer = document.querySelector('#taskPlayers audio');
+      oldPlayer.muted = true;
+      await oldPlayer.play();
+    });
+    delayPoll = true;
+    await page.evaluate(() => { window.pendingPoll = poll(); });
+    const pending = await stalled;
+    await page.locator('#apikey').fill('bob-secret');
+    await page.locator('#apikey').dispatchEvent('change');
+    await page.locator('[data-id="bob-task"]').waitFor();
+    await pending.fulfill({ json: state });
+    await page.evaluate(() => window.pendingPoll);
+    assert.equal(await page.locator('#taskPlayers').count(), 0);
+    assert.equal(await page.locator('[data-id="alice-task"]').count(), 0);
+    assert.equal(await page.evaluate(() => current === null && elapsedClock === null && oldPlayer.paused), true);
+    assert.match(await page.locator('#detail').textContent(), /请选择或提交/);
+  } finally { await browser.close(); }
+});
+
 test('delete confirms, handles errors, clears selection and protects active tasks', { timeout: 30000 }, async () => {
   const browser = await chromium.launch({ headless: true });
   try {
