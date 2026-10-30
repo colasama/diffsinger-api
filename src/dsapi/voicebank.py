@@ -10,21 +10,16 @@ from functools import cached_property
 from pathlib import Path
 
 import numpy as np
-import onnxruntime as ort
 import yaml
 
 from . import settings
+from .onnx_backend import OnnxSession, create_session
 
 LANGS = ("zh", "ja")
 
 
-def _session(path: Path) -> ort.InferenceSession:
-    opts = ort.SessionOptions()
-    opts.log_severity_level = 3
-    providers = [p for p in ("CUDAExecutionProvider", "CoreMLExecutionProvider") if p in ort.get_available_providers()]
-    # CoreML rejects the dynamic shapes these graphs use; stay on CPU unless CUDA exists.
-    providers = [p for p in providers if p == "CUDAExecutionProvider"] + ["CPUExecutionProvider"]
-    return ort.InferenceSession(str(path), opts, providers=providers)
+def _session(path: Path) -> OnnxSession:
+    return create_session(path)
 
 
 class _Model:
@@ -35,9 +30,9 @@ class _Model:
         self.cfg = yaml.safe_load((root / "dsconfig.yaml").read_text(encoding="utf8"))
         self.phonemes: dict[str, int] = json.loads((root / self.cfg["phonemes"]).read_text())
         self.languages: dict[str, int] = json.loads((root / self.cfg["languages"]).read_text())
-        self._sessions: dict[str, ort.InferenceSession] = {}
+        self._sessions: dict[str, OnnxSession] = {}
 
-    def session(self, key: str) -> ort.InferenceSession:
+    def session(self, key: str) -> OnnxSession:
         if key not in self._sessions:
             self._sessions[key] = _session(self.root / self.cfg[key])
         return self._sessions[key]
@@ -78,7 +73,7 @@ class Voicebank:
         self.variance = _Model(root / "dsvariance")
         voc_cfg = yaml.safe_load((vocoder / "vocoder.yaml").read_text())
         self._vocoder_path = vocoder / voc_cfg["model"]
-        self._vocoder: ort.InferenceSession | None = None
+        self._vocoder: OnnxSession | None = None
 
     @cached_property
     def dictionaries(self) -> dict[str, dict[str, list[str]]]:
@@ -187,7 +182,7 @@ class Voicebank:
             "steps": np.array(steps, np.int64)})[0][0]
 
     def predict_variance(self, phones: list[str], ph_dur: np.ndarray, pitch_midi: np.ndarray,
-                         steps: int = 10) -> tuple[np.ndarray, np.ndarray]:
+                         steps: int = 20) -> tuple[np.ndarray, np.ndarray]:
         tokens, langs = self.variance.encode(phones)
         enc, _ = self.variance.session("linguistic").run(None, {
             "tokens": tokens, "languages": langs, "ph_dur": ph_dur[None].astype(np.int64)})

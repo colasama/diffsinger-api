@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import audio, settings, sources
+from . import audio, onnx_backend, settings, sources
 from .pipeline import Job, JobSpec, voicebank
 from .score import Note, Phrase, Syllable, render_score
 
@@ -189,6 +189,11 @@ def tasks(limit: int = 30) -> list[dict]:
         st = json.loads(path.read_text())
         out.append({k: st.get(k) for k in ("task_id", "status", "stage", "song", "window", "error")})
     return out
+
+
+@app.get("/runtime", dependencies=[Depends(auth)])
+def runtime() -> dict:
+    return {"synthesis": onnx_backend.backend_status()}
 
 
 @app.get("/search", dependencies=[Depends(auth)])

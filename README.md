@@ -5,7 +5,7 @@ chorus from its LRC, isolate the lead vocal, transcribe notes, align lyrics,
 then render with ImportedFixed (用户固定音源). No LLM anywhere in the pipeline.
 
 ```
-NetEase id ─▶ audio + LRC ─▶ chorus window ─▶ BS-RoFormer + karaoke (lead vocal)
+Song id ─▶ audio + LRC ─▶ chorus window ─▶ BS-RoFormer + karaoke (lead vocal)
           ─▶ SOME notes + RMVPE f0 ─▶ SOFA alignment per LRC line
           ─▶ phrases ─┬─▶ mimic: real phoneme timing + source f0 ─▶ variance/acoustic/vocoder
                       └─▶ score: grid-quantized notes ─▶ dur/pitch/variance/acoustic/vocoder
@@ -42,6 +42,27 @@ alignment report), and `error.txt` on failure.
 
 Set `DSAPI_KEY` to require `Authorization: Bearer <key>`.
 
+## Inference backend
+
+Synthesis defaults to **CUDA GPU → WebGPU → CPU**, trying the next backend if
+session initialization fails. On Apple Silicon, native WebGPU uses Metal.
+The plugin is included in `uv sync`. Set `DSAPI_ONNX_BACKEND=cpu|cuda|webgpu`
+to require a specific backend, or leave it at `auto`. Restart after changes.
+
+With `uv run dsapi serve --webui`, the header shows the actual loaded synthesis
+backends and any initialization fallback (details on hover). Before loading,
+it shows the preference order. `/runtime` exposes the same status. Vocal
+separation independently uses PyTorch MPS on this Mac.
+See [measurements and compatibility notes](docs/inference-performance.md).
+
+## Synthesis defaults
+
+Acoustic uses 20 sampling steps, pitch uses 10, and variance uses 20.
+Acoustic depth follows the imported voicebank's `max_depth`.
+Duration prediction and the vocoder have no sampling-step setting.
+These defaults apply to both synthesis modes; mimic uses aligned source timing
+and extracted pitch directly, so it skips duration and pitch prediction.
+
 ## Layout
 
 - `src/dsapi/voicebank.py` – ONNX inference for OpenUtau-format DiffSinger voicebanks
@@ -68,9 +89,27 @@ and can load a task's `score.json` into an editor and re-render it.
 
 | Value | Needs | Notes |
 |---|---|---|
-| `netease` (default) | nothing | direct public NetEase endpoints; VIP/region-locked tracks fail |
+| `musicbox` (default) | nothing | [枫叶音乐盒](https://mu-jie.cc/musicBox/#/search); default platform `netease`, optional `DSAPI_MUSICBOX_SERVER=kuwo` or `qq` |
+| `netease` | nothing | direct public NetEase endpoints; VIP/region-locked tracks fail |
 | `ncm-api` | `DSAPI_SOURCE_URL`, optional `DSAPI_NCM_COOKIE` | self-hosted [api-enhanced](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced) (`docker run -p 3000:3000 moefurina/ncm-api`); signed requests, login cookie unlocks VIP tracks |
 | `meting` | `DSAPI_SOURCE_URL`, `DSAPI_METING_SERVER` | self-hosted Meting API; `netease`, `tencent`, `kugou`, `kuwo`, … |
 
-Point these at instances you run yourself; third-party public deployments are
-not meant to be called from servers.
+The default MusicBox API is `https://fy-musicbox-api.mu-jie.cc`. Search uses
+`/{platform}/search/song/`; song details, LRC and audio use `/meting/` with
+the site's required request headers. `DSAPI_SOURCE_URL` can override the API
+root (do not include `/musicBox/#/search` or `/meting/`). Search results supply
+the song IDs to use with `/release_task` or `dsapi run`; IDs belong to the
+configured platform. The default `netease` platform accepts existing NetEase IDs.
+
+For example, to explicitly select the default in `.env`:
+
+```dotenv
+DSAPI_SOURCE=musicbox
+DSAPI_MUSICBOX_SERVER=netease
+```
+
+Remove a previous `DSAPI_SOURCE_URL` override when switching to the public
+MusicBox API. Upstream failures (including HTTP 502), missing lyrics, or
+unavailable audio fail the task; there is no automatic switch to another source.
+Uploading your own audio + LRC remains available. For `ncm-api` and `meting`,
+configure `DSAPI_SOURCE_URL` with your own instance.

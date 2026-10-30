@@ -943,6 +943,7 @@ dependencies = [
     { name = "mido" },
     { name = "numpy" },
     { name = "onnxruntime" },
+    { name = "onnxruntime-ep-webgpu" },
     { name = "pandas" },
     { name = "praat-parselmouth" },
     { name = "pypinyin" },
@@ -956,6 +957,11 @@ dependencies = [
     { name = "tqdm" },
     { name = "unidic-lite" },
     { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.optional-dependencies]
+webgpu = [
+    { name = "onnxruntime-ep-webgpu" },
 ]
 
 [package.dev-dependencies]
@@ -979,6 +985,8 @@ requires-dist = [
     { name = "mido", specifier = ">=1.3.3" },
     { name = "numpy", specifier = "<2" },
     { name = "onnxruntime", specifier = ">=1.31.1" },
+    { name = "onnxruntime-ep-webgpu", specifier = "==0.4.0" },
+    { name = "onnxruntime-ep-webgpu", marker = "extra == 'webgpu'", specifier = "==0.4.0" },
     { name = "pandas", specifier = ">=2.3.3" },
     { name = "praat-parselmouth", specifier = ">=0.4.7" },
     { name = "pypinyin", specifier = ">=0.55.0" },
@@ -993,6 +1001,7 @@ requires-dist = [
     { name = "unidic-lite", specifier = ">=1.0.8" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.54.0" },
 ]
+provides-extras = ["webgpu"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=9.2.0" }]
@@ -2590,6 +2599,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ed/ee/b69384d9b94c6bf3beb030bcba25dc573e490d3136117be0f78d79078d35/onnxruntime-1.31.1-cp314-cp314-win_arm64.whl", hash = "sha256:fc01b4e7c0a81778fb741bcf5c16b7871d196275f6240720a8b8bfd9f0c0af14", size = 15153930, upload-time = "2026-10-26T19:27:06.159Z" },
     { url = "https://files.pythonhosted.org/packages/2b/5b/beeb6acb5a9e17311b4ebc36fe91ac4893200ddb290257fb072509a7c26b/onnxruntime-1.31.1-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:564d7b83fb3e94fb3d18629c6b339e9bce10966dd29a8442c433175aac3d60fd", size = 21432341, upload-time = "2026-10-26T19:27:09.131Z" },
     { url = "https://files.pythonhosted.org/packages/c6/3d/a5b15c4ab9d67a384da5a2c10fb569e643076c28179fe1a265af7d8f1b87/onnxruntime-1.31.1-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:4d5f5fcc01f0c334d282a8991eab44e7752ad01c47b336d848ba43eb38084958", size = 23772582, upload-time = "2026-10-26T19:27:12.025Z" },
+]
+
+[[package]]
+name = "onnxruntime-ep-webgpu"
+version = "0.4.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c3/9f/1e09865bbe4c9202ff1334545535be32dfdbeffc46e7d4c36c5de67ffafe/onnxruntime_ep_webgpu-0.4.0-py3-none-macosx_14_0_universal2.whl", hash = "sha256:8d0a91d44b43d931c3068b9134aed9770f27803e353c2b58c93e1700bb68bcca", size = 5200679, upload-time = "2026-09-22T17:08:33.577Z" },
+    { url = "https://files.pythonhosted.org/packages/4e/ca/00c70322c19913c81a6bb2239aca83781b97a818b55c2ec3d25cec72dc4c/onnxruntime_ep_webgpu-0.4.0-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:17f660db53b1a509c63e721ac6784a2daa1c4e91a968523ee9986505ee5b0a55", size = 6096222, upload-time = "2026-09-22T17:08:35.569Z" },
+    { url = "https://files.pythonhosted.org/packages/c1/96/2a18a45079250afcd825687aef2895de266d5abc1cff9f52d2dede7598f2/onnxruntime_ep_webgpu-0.4.0-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:5d8c961eda91a88961cad1fb7621f389f006b18497d6ea9ecf96f729f066cbfb", size = 6892120, upload-time = "2026-09-22T17:08:38.168Z" },
+    { url = "https://files.pythonhosted.org/packages/d7/a4/c98a9e9433b3eeb576977b26c5c1cd0364f15ba9d198bb16101e7563ab06/onnxruntime_ep_webgpu-0.4.0-py3-none-win_amd64.whl", hash = "sha256:7db646669d1a2390551da675115ea125e68cb3d4d2c3a2d6e463372bf8d6ea87", size = 13149847, upload-time = "2026-09-22T17:08:40.238Z" },
+    { url = "https://files.pythonhosted.org/packages/cd/35/e1b1b12e596354d05af43cea09cd9fbd8a24b6df3853c527307b5cfb8d4b/onnxruntime_ep_webgpu-0.4.0-py3-none-win_arm64.whl", hash = "sha256:a9586f6744370776059edd794c11bca2f563258a5bd2707864aefff31d3af39f", size = 14194630, upload-time = "2026-09-22T17:08:42.99Z" },
 ]
 
 [[package]]

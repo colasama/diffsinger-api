@@ -26,6 +26,7 @@ test('audio survives polling and completion; elapsed time advances and freezes',
     const started = Date.now();
     let polls = 0;
     let failPoll = false;
+    let runtime = { configured: 'auto', priority: ['cuda', 'webgpu', 'cpu'], sessions: [] };
     let state = { task_id: 'partial', status: 'running', stage: 'render_score',
       spec: { modes: ['mimic', 'score'] }, timings: { render_mimic: 10 },
       outputs: { mimic: '/v1/audio?task_id=partial&kind=mimic' } };
@@ -33,6 +34,7 @@ test('audio survives polling and completion; elapsed time advances and freezes',
       const url = new URL(route.request().url());
       if (url.pathname === '/ui/') return route.fulfill({ contentType: 'text/html', body: html });
       if (url.pathname === '/tasks') return route.fulfill({ json: [state] });
+      if (url.pathname === '/runtime') return route.fulfill({ json: { synthesis: runtime } });
       if (url.pathname === '/query_result') {
         polls++;
         if (failPoll) return route.fulfill({ status: 503, body: 'temporary failure' });
@@ -43,6 +45,13 @@ test('audio survives polling and completion; elapsed time advances and freezes',
       return route.fulfill({ status: 404 });
     });
     await page.goto('http://dsapi.test/ui/');
+    await page.waitForFunction(() => document.querySelector('#runtime').textContent.includes('待加载'));
+    assert.match(await page.locator('#runtime').textContent(), /GPU \(CUDA\) → WebGPU → CPU/);
+    runtime.sessions = [{ model: 'acoustic', backend: 'webgpu',
+      providers: ['WebGpuExecutionProvider', 'CPUExecutionProvider'], fallback_reasons: [] }];
+    await page.locator('#refresh').click();
+    await page.waitForFunction(() => document.querySelector('#runtime').textContent === '合成后端：WebGPU');
+    assert.match(await page.locator('#runtime').getAttribute('title'), /WebGpuExecutionProvider/);
     await page.locator('#tasks li').click();
     await page.locator('#taskPlayers audio').waitFor();
     await page.evaluate(async () => {
@@ -98,6 +107,11 @@ test('audio survives polling and completion; elapsed time advances and freezes',
     await page.evaluate(() => renderDetail(legacyState));
     assert.notEqual(await elapsed(), 'running · 2.0s');
     assert.deepEqual(errors, []);
+    runtime.sessions = [{ model: 'acoustic', backend: 'cpu',
+      providers: ['CPUExecutionProvider'], fallback_reasons: ['webgpu: no device'] }];
+    await page.locator('#refresh').click();
+    await page.waitForFunction(() => document.querySelector('#runtime').textContent === '合成后端：CPU（已回退）');
+    assert.match(await page.locator('#runtime').getAttribute('title'), /webgpu: no device/);
   } finally {
     await browser.close();
   }
