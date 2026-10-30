@@ -1,0 +1,50 @@
+[project]
+name = "dsapi"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Colanns", email = "mycolands@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "audio-separator>=0.30.2",
+    "chardet>=7.7.0",
+    "click>=8.5.0",
+    "einops>=0.8.2",
+    "fastapi>=0.162.0",
+    "fugashi>=1.5.2",
+    "h5py>=3.16.0",
+    "httpx>=0.28.1",
+    "librosa>=0.11.0",
+    "lightning>=2.0",
+    "matplotlib>=3.11.2",
+    "mido>=1.3.3",
+    "numpy<2",
+    "onnxruntime>=1.31.1",
+    "pandas>=2.3.3",
+    "praat-parselmouth>=0.4.7",
+    "pypinyin>=0.55.0",
+    "python-multipart>=0.0.32",
+    "pyyaml>=6.0.3",
+    "scipy>=1.17.1",
+    "soundfile>=0.14.0",
+    "textgrid>=1.6.1",
+    "torch>=2.4",
+    "torchaudio>=2.11.1",
+    "tqdm>=4.70.1",
+    "unidic-lite>=1.0.8",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[project.scripts]
+dsapi = "dsapi:main"
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]

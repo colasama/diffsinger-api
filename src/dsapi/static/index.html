@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dsapi</title>
+<style>
+:root {
+  --bg: #f6f6f4; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e3de;
+  --accent: #c2410c; --accent-soft: #fdeee6; --ok: #15803d; --bad: #b91c1c; --run: #1d4ed8;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #161615; --panel: #1f1f1e; --text: #ecece8; --muted: #9a9a93; --line: #33332f;
+          --accent: #fb923c; --accent-soft: #3a2416; --ok: #4ade80; --bad: #f87171; --run: #93c5fd; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "PingFang SC", sans-serif; }
+header { display: flex; align-items: baseline; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+header h1 { font-size: 17px; margin: 0; }
+header .attr { color: var(--muted); font-size: 12px; }
+header .key { margin-left: auto; display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 12px; }
+main { display: grid; grid-template-columns: 320px 1fr; gap: 16px; padding: 16px 20px; max-width: 1400px; margin: 0 auto; }
+@media (max-width: 860px) { main { grid-template-columns: 1fr; padding: 12px 16px; } }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 16px; min-width: 0; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 3px; }
+input, textarea { width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+textarea { font-family: var(--mono); font-size: 12px; min-height: 220px; resize: vertical; }
+.row { display: flex; gap: 8px; }
+.row > * { flex: 1; min-width: 0; }
+.checks { display: flex; gap: 14px; margin-top: 8px; }
+.checks label { display: flex; gap: 5px; align-items: center; margin: 0; color: var(--text); font-size: 13px; }
+.checks input { width: auto; }
+button { padding: 7px 14px; border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 6px; font: inherit; cursor: pointer; }
+button.ghost { background: transparent; color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+.list { list-style: none; margin: 0; padding: 0; }
+.list li { padding: 7px 8px; border-radius: 6px; cursor: pointer; display: flex; justify-content: space-between; gap: 8px; }
+.list li:hover, .list li.active { background: var(--accent-soft); }
+.list .sub { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.badge { font-size: 11px; padding: 1px 7px; border-radius: 99px; border: 1px solid currentColor; white-space: nowrap; align-self: center; }
+.done { color: var(--ok); } .failed { color: var(--bad); } .running, .queued { color: var(--run); }
+.stages { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 12px; }
+.stage { font-size: 12px; padding: 3px 8px; border-radius: 5px; border: 1px solid var(--line); color: var(--muted); }
+.stage.ok { color: var(--ok); border-color: currentColor; }
+.stage.cur { color: var(--run); border-color: currentColor; }
+.players { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.players div { font-size: 12px; color: var(--muted); }
+audio { width: 100%; margin-top: 3px; }
+pre { font-family: var(--mono); font-size: 13px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 12px; overflow-x: auto; margin: 0; white-space: pre; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+td, th { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 500; }
+.err { color: var(--bad); white-space: pre-wrap; font-family: var(--mono); font-size: 12px; }
+.muted { color: var(--muted); }
+.head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.head h2 { margin: 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>dsapi</h1>
+  <span class="attr">AI 合成 · 声库：用户固定音源 · 引擎：DiffSinger</span>
+  <span class="key">API key <input id="apikey" type="password" style="width:140px" placeholder="未设置可留空"></span>
+</header>
+<main>
+  <div>
+    <section>
+      <h2>新任务</h2>
+      <label>搜索歌曲</label>
+      <div class="row"><input id="q" placeholder="歌名 / 歌手"><button class="ghost" id="searchBtn" style="flex:0">搜索</button></div>
+      <ul class="list" id="results"></ul>
+      <div class="checks" style="margin-top:10px">
+        <label><input type="radio" name="srcMode" value="id" checked>歌曲 ID</label>
+        <label><input type="radio" name="srcMode" value="upload">上传音频 + LRC</label>
+      </div>
+      <div id="byId">
+        <label>歌曲 ID</label>
+        <input id="songId" placeholder="3414700455">
+      </div>
+      <div id="byUpload" hidden>
+        <label>音频文件（mp3 / flac / wav / m4a）</label>
+        <input id="audioFile" type="file" accept="audio/*">
+        <label>LRC 歌词文件，或直接粘贴到下面</label>
+        <input id="lrcFile" type="file" accept=".lrc,.txt">
+        <textarea id="lrcText" style="min-height:90px" placeholder="[00:15.69]健忘的症状这种"></textarea>
+      </div>
+      <div class="row">
+        <div><label>开始（秒，可选）</label><input id="start" inputmode="decimal"></div>
+        <div><label>结束（秒，可选）</label><input id="end" inputmode="decimal"></div>
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" id="mMimic" checked>模仿模式</label>
+        <label><input type="checkbox" id="mScore" checked>乐谱模式</label>
+      </div>
+      <div style="margin-top:12px"><button id="submit">提交</button></div>
+      <p class="muted" style="font-size:12px;margin:8px 0 0">不填时间窗时按 LRC 自动定位副歌。同一时间只跑一个任务，其余排队。</p>
+    </section>
+    <section>
+      <div class="head"><h2>最近任务</h2><button class="ghost" id="refresh">刷新</button></div>
+      <ul class="list" id="tasks"></ul>
+    </section>
+  </div>
+  <div>
+    <section id="detail"><p class="muted">选择或提交一个任务。</p></section>
+    <section>
+      <div class="head"><h2>乐谱合成</h2><button id="renderBtn">合成</button></div>
+      <p class="muted" style="font-size:12px;margin:0 0 8px">编辑 score.json（时间单位为秒，midi 为音高）后直接用用户固定音源合成，不经过提取流程。</p>
+      <textarea id="scoreText" spellcheck="false"></textarea>
+      <div id="renderOut" style="margin-top:10px"></div>
+    </section>
+  </div>
+</main>
+<script>
+const STAGES = ["fetch", "select", "separate", "notes_f0", "align", "build", "quantize", "render_mimic", "render_score"];
+const STAGE_NAMES = { fetch: "取歌", select: "选段", separate: "人声分离", notes_f0: "音符/F0", align: "歌词对齐",
+  build: "组装", quantize: "量化/简谱", render_mimic: "模仿渲染", render_score: "乐谱渲染" };
+const OUT_NAMES = { clip: "原曲片段", lead: "分离人声", mimic: "模仿模式", score: "乐谱模式" };
+const $ = (id) => document.getElementById(id);
+let current = null, timer = null;
+
+const keyStore = { get() { try { return localStorage.getItem("dsapi.key") || ""; } catch { return ""; } },
+                   set(v) { try { localStorage.setItem("dsapi.key", v); } catch {} } };
+$("apikey").value = keyStore.get();
+$("apikey").addEventListener("change", (e) => { keyStore.set(e.target.value); loadTasks(); });
+
+function withKey(url) {
+  const k = $("apikey").value;
+  return k ? url + (url.includes("?") ? "&" : "?") + "key=" + encodeURIComponent(k) : url;
+}
+async function api(path, opts = {}) {
+  const res = await fetch(withKey(path), opts);
+  if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 200)}`);
+  return res;
+}
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmtTime = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`;
+
+$("searchBtn").onclick = async () => {
+  const q = $("q").value.trim();
+  if (!q) return;
+  $("results").innerHTML = `<li class="muted">搜索中…</li>`;
+  try {
+    const songs = await (await api(`/search?q=${encodeURIComponent(q)}`)).json();
+    $("results").innerHTML = songs.map((s) => `<li data-id="${s.id}"><span>${esc(s.name)}<div class="sub">${esc(s.artists.join(" / "))}</div></span><span class="sub">${s.duration_ms ? fmtTime(s.duration_ms / 1000) : ""}</span></li>`).join("") || `<li class="muted">没有结果</li>`;
+  } catch (e) { $("results").innerHTML = `<li class="err">${esc(e.message)}</li>`; }
+};
+$("q").addEventListener("keydown", (e) => { if (e.key === "Enter") $("searchBtn").click(); });
+$("results").onclick = (e) => { const li = e.target.closest("li[data-id]"); if (li) $("songId").value = li.dataset.id; };
+
+const srcMode = () => document.querySelector('input[name="srcMode"]:checked').value;
+document.querySelectorAll('input[name="srcMode"]').forEach((r) => r.onchange = () => {
+  $("byId").hidden = srcMode() !== "id";
+  $("byUpload").hidden = srcMode() !== "upload";
+});
+
+$("submit").onclick = async () => {
+  const modes = [];
+  if ($("mMimic").checked) modes.push("mimic");
+  if ($("mScore").checked) modes.push("score");
+  const s = parseFloat($("start").value), en = parseFloat($("end").value);
+  const windowSet = !isNaN(s) && !isNaN(en);
+  let req;
+  if (srcMode() === "id") {
+    const body = { song_id: $("songId").value.trim(), modes };
+    if (!body.song_id) return alert("请填写歌曲 ID");
+    if (windowSet) Object.assign(body, { start: s, end: en });
+    req = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  } else {
+    const audio = $("audioFile").files[0];
+    if (!audio) return alert("请选择音频文件");
+    if (!$("lrcFile").files[0] && !$("lrcText").value.trim()) return alert("请提供 LRC 歌词");
+    const form = new FormData();
+    form.append("audio_file", audio);
+    if ($("lrcFile").files[0]) form.append("lrc_file", $("lrcFile").files[0]);
+    else form.append("lrc_text", $("lrcText").value);
+    form.append("modes", modes.join(","));
+    if (windowSet) { form.append("start", s); form.append("end", en); }
+    req = { method: "POST", body: form };
+  }
+  $("submit").disabled = true;
+  try {
+    const path = srcMode() === "id" ? "/release_task" : "/release_task_upload";
+    const { task_id } = await (await api(path, req)).json();
+    await loadTasks();
+    select(task_id);
+  } catch (e) { alert(e.message); }
+  $("submit").disabled = false;
+};
+
+async function loadTasks() {
+  try {
+    const list = await (await api("/tasks")).json();
+    $("tasks").innerHTML = list.map((t) => `<li data-id="${t.task_id}" class="${t.task_id === current ? "active" : ""}"><span style="min-width:0">${esc(t.song?.name || t.task_id)}<div class="sub">${esc(t.task_id)}${t.window ? " · " + t.window.map(fmtTime).join("–") : ""}</div></span><span class="badge ${t.status}">${t.status}</span></li>`).join("") || `<li class="muted">暂无任务</li>`;
+  } catch (e) { $("tasks").innerHTML = `<li class="err">${esc(e.message)}</li>`; }
+}
+$("tasks").onclick = (e) => { const li = e.target.closest("li[data-id]"); if (li) select(li.dataset.id); };
+$("refresh").onclick = loadTasks;
+
+function select(id) {
+  current = id;
+  clearTimeout(timer);
+  document.querySelectorAll("#tasks li").forEach((li) => li.classList.toggle("active", li.dataset.id === id));
+  poll();
+}
+
+async function poll() {
+  const id = current;
+  let st;
+  try { st = await (await api(`/query_result?task_id=${id}`)).json(); }
+  catch (e) { $("detail").innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  if (id !== current) return;
+  renderDetail(st);
+  if (st.status === "queued" || st.status === "running") timer = setTimeout(poll, 2000);
+  else loadTasks();
+}
+
+function renderDetail(st) {
+  const wanted = STAGES.filter((s) => !s.startsWith("render_") || (st.spec.modes || []).includes(s.slice(7)));
+  const stages = wanted.map((s) => {
+    const t = st.timings[s];
+    const cls = t !== undefined ? "ok" : (st.stage === s && st.status === "running" ? "cur" : "");
+    return `<span class="stage ${cls}">${STAGE_NAMES[s]}${t !== undefined ? " " + t + "s" : ""}</span>`;
+  }).join("");
+  const total = Object.values(st.timings).reduce((a, b) => a + b, 0);
+  const players = Object.entries(st.outputs).sort(([a], [b]) => Object.keys(OUT_NAMES).indexOf(a) - Object.keys(OUT_NAMES).indexOf(b))
+    .map(([k, url]) => `<div>${OUT_NAMES[k] || k}<audio controls preload="none" src="${withKey(url)}"></audio></div>`).join("");
+  const align = (st.alignment || []).map((a) => `<tr><td>${esc(a.line)}</td><td>${a.error ? `<span class="failed">${esc(a.error)}</span>` : (a.confidence ?? 0).toFixed(2)}</td><td>${a.syllables ?? ""}</td><td>${a.notes ?? ""}</td></tr>`).join("");
+  $("detail").innerHTML = `
+    <div class="head">
+      <h2>${esc(st.song?.name || st.task_id)} ${st.song?.artists ? `<span class="muted" style="text-transform:none">· ${esc(st.song.artists.join(" / "))}</span>` : ""}</h2>
+      <span class="badge ${st.status}">${st.status}${total ? ` · ${total.toFixed(1)}s` : ""}</span>
+    </div>
+    <div class="stages">${stages}</div>
+    ${st.window ? `<p class="muted" style="margin:0 0 10px">片段 ${fmtTime(st.window[0])}–${fmtTime(st.window[1])}${st.tonic ? ` · 1=${esc(st.tonic)} · ♩=${st.grid?.bpm}` : ""}</p>` : ""}
+    ${st.error ? `<p class="err">${esc(st.error)}</p>` : ""}
+    ${players ? `<div class="players">${players}</div>` : ""}
+    ${st.jianpu ? `<div class="head" style="margin-top:14px"><h2>简谱（自动转写，可能有误）</h2><button class="ghost" id="toEditor">载入合成器</button></div><pre>${esc(st.jianpu)}</pre>` : ""}
+    ${st.status === "done" ? evalBlock(st) : ""}
+    ${align ? `<h2 style="margin-top:14px">对齐报告</h2><div style="overflow-x:auto"><table><tr><th>歌词行</th><th>置信度</th><th>字数</th><th>音符</th></tr>${align}</table></div>` : ""}`;
+  const evBtn = $("evalBtn");
+  if (evBtn) evBtn.onclick = async () => {
+    evBtn.disabled = true; evBtn.textContent = "评估中…";
+    try { await api(`/evaluate?task_id=${st.task_id}`, { method: "POST" }); poll(); }
+    catch (e) { alert(e.message); evBtn.disabled = false; evBtn.textContent = "运行评估"; }
+  };
+  const btn = $("toEditor");
+  if (btn) btn.onclick = async () => {
+    try { function evalBlock(st) {
+  const ev = st.evaluation;
+  const pct = (v) => v == null ? "–" : (v * 100).toFixed(1) + "%";
+  const rows = !ev ? "" : [
+    ev.mimic_pitch && ["模仿 · 音高", `中位误差 ${ev.mimic_pitch.median_cents} 音分`, `${pct(ev.mimic_pitch.within_50c)} 帧在 50 音分内`],
+    ev.mimic_intelligibility && ["模仿 · 咬字", `重对齐起点中位偏差 ${ev.mimic_intelligibility.onset_median_ms} ms`, `${pct(ev.mimic_intelligibility.onset_within_50ms)} 字在 50 ms 内 · 置信度 ${ev.mimic_intelligibility.realign_confidence}（原唱 ${ev.mimic_intelligibility.source_confidence}）`],
+    ev.score_pitch && ["乐谱 · 音准", `${pct(ev.score_pitch.notes_on_pitch)} 音符在谱面音高`, `${ev.score_pitch.notes} 个音符`],
+  ].filter(Boolean).map((r) => `<tr><td>${r[0]}</td><td>${r[1]}</td><td class="muted">${r[2]}</td></tr>`).join("");
+  return `<div class="head" style="margin-top:14px"><h2>客观评估</h2><button class="ghost" id="evalBtn">${ev ? "重新评估" : "运行评估"}</button></div>
+    ${rows ? `<div style="overflow-x:auto"><table>${rows}</table></div>` : `<p class="muted" style="margin:0">用 pyin 测音高、用 SOFA 重新对齐渲染结果，约 15 秒。</p>`}`;
+}
+
+$("scoreText").value = JSON.stringify(await (await api(`/v1/score?task_id=${st.task_id}`)).json(), null, 1); $("scoreText").scrollIntoView({ behavior: "smooth" }); }
+    catch (e) { alert(e.message); }
+  };
+}
+
+function evalBlock(st) {
+  const ev = st.evaluation;
+  const pct = (v) => v == null ? "–" : (v * 100).toFixed(1) + "%";
+  const rows = !ev ? "" : [
+    ev.mimic_pitch && ["模仿 · 音高", `中位误差 ${ev.mimic_pitch.median_cents} 音分`, `${pct(ev.mimic_pitch.within_50c)} 帧在 50 音分内`],
+    ev.mimic_intelligibility && ["模仿 · 咬字", `重对齐起点中位偏差 ${ev.mimic_intelligibility.onset_median_ms} ms`, `${pct(ev.mimic_intelligibility.onset_within_50ms)} 字在 50 ms 内 · 置信度 ${ev.mimic_intelligibility.realign_confidence}（原唱 ${ev.mimic_intelligibility.source_confidence}）`],
+    ev.score_pitch && ["乐谱 · 音准", `${pct(ev.score_pitch.notes_on_pitch)} 音符在谱面音高`, `${ev.score_pitch.notes} 个音符`],
+  ].filter(Boolean).map((r) => `<tr><td>${r[0]}</td><td>${r[1]}</td><td class="muted">${r[2]}</td></tr>`).join("");
+  return `<div class="head" style="margin-top:14px"><h2>客观评估</h2><button class="ghost" id="evalBtn">${ev ? "重新评估" : "运行评估"}</button></div>
+    ${rows ? `<div style="overflow-x:auto"><table>${rows}</table></div>` : `<p class="muted" style="margin:0">用 pyin 测音高、用 SOFA 重新对齐渲染结果，约 15 秒。</p>`}`;
+}
+
+$("scoreText").value = JSON.stringify({ phrases: [[..."一闪一闪亮晶晶"].map((t, i) => ({
+  text: t, pinyin: ["yi", "shan", "yi", "shan", "liang", "jing", "jing"][i],
+  notes: [{ start: 0.5 + i * 0.6, dur: i === 6 ? 1.2 : 0.6, midi: [60, 60, 67, 67, 69, 69, 67][i] }] }))] }, null, 1);
+
+$("renderBtn").onclick = async () => {
+  let body;
+  try { body = JSON.parse($("scoreText").value); } catch (e) { return alert("JSON 格式错误：" + e.message); }
+  $("renderBtn").disabled = true;
+  $("renderOut").innerHTML = `<span class="muted">合成中…</span>`;
+  try {
+    const blob = await (await api("/render_score", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })).blob();
+    $("renderOut").innerHTML = `<audio controls autoplay src="${URL.createObjectURL(blob)}"></audio>`;
+  } catch (e) { $("renderOut").innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+  $("renderBtn").disabled = false;
+};
+
+loadTasks();
+</script>
+</body>
+</html>
