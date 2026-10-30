@@ -8,6 +8,10 @@ import numpy as np
 import onnxruntime as ort
 import torch
 
+# The v1.0.3 encoder uses a 2048-point STFT with 803/804-sample reflect padding
+# at 44.1 kHz. 100 ms gives short regions safe spectral/temporal context.
+MIN_CONTEXT_SECONDS = 0.1
+
 
 @lru_cache(maxsize=None)
 def load_models(root: str):
@@ -36,12 +40,24 @@ def transcribe(waveform, config, sessions, regions, language, steps):
         b = min(len(waveform), round(region["end"] * sr))
         if b <= a:
             raise ValueError("GAME region has no audio")
-        offset = a / sr
-        duration = np.array([(b - a) / sr], np.float32)
+        start, end = a / sr, b / sr
+        minimum = max(1, int(np.ceil(MIN_CONTEXT_SECONDS * sr)))
+        left, right = a, b
+        if b - a < minimum:
+            left = max(0, a - (minimum - (b - a)) // 2)
+            right = min(len(waveform), left + minimum)
+            left = max(0, right - minimum)
+        samples = waveform[left:right].astype(np.float32)
+        if len(samples) < minimum:
+            # A whole input can also be shorter than the model's minimum.
+            samples = np.pad(samples, (0, minimum - len(samples)))
+        offset = left / sr
+        duration = np.array([len(samples) / sr], np.float32)
         xs, xe, mask = sessions["encoder"].run(None, {
-            "waveform": waveform[None, a:b].astype(np.float32), "duration": duration})
+            "waveform": samples[None], "duration": duration})
         bounds = [0., float(duration[0])]
-        bounds.extend(t - offset for t in region["boundaries"] if 0 < t - offset < duration[0])
+        bounds.extend(t - offset for t in [start, *region["boundaries"], end]
+                      if 0 < t - offset < duration[0])
         durations = np.diff(sorted(set(bounds))).astype(np.float32)[None]
         known = sessions["dur2bd"].run(None, {"durations": durations, "maskT": mask})[0]
         previous = known
@@ -61,8 +77,11 @@ def transcribe(waveform, config, sessions, regions, language, steps):
                 continue
             if not np.isfinite(dur) or not np.isfinite(midi) or dur < 0:
                 raise ValueError("GAME produced invalid note values")
-            if dur > 0:
-                notes.append({"start": t, "dur": float(dur), "midi": float(midi), "rest": not bool(voiced)})
+            # Context and spectral padding must never extend the score timeline.
+            note_start, note_end = max(t, start), min(t + float(dur), end)
+            if note_end > note_start:
+                notes.append({"start": note_start, "dur": note_end - note_start,
+                              "midi": float(midi), "rest": not bool(voiced)})
             t += float(dur)
     return notes
 

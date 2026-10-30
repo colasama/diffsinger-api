@@ -158,7 +158,15 @@ def _split(spans: list[tuple[float, float]], languages: list[str] | None = None)
         if spans[b - 1][1] - spans[a][0] <= MAX_PHRASE or b - a < 2:
             out.append((a, b))
             continue
-        k = max(range(a + 1, b), key=lambda k: spans[k][0] - spans[k - 1][1])
+        # A continuous aligned run often has zero (or rounding-sized) gaps.
+        # Repeatedly choosing its first boundary peels off single syllables.
+        # Prefer substantial groups and balance tied gaps at 10 ms precision.
+        candidates = [k for k in range(a + 1, b)
+                      if spans[k - 1][1] - spans[a][0] >= PHRASE_GAP
+                      and spans[b - 1][1] - spans[k][0] >= PHRASE_GAP]
+        k = max(candidates or range(a + 1, b), key=lambda k: (
+            round(max(0.0, spans[k][0] - spans[k - 1][1]), 2),
+            -abs((spans[k - 1][1] - spans[a][0]) - (spans[b - 1][1] - spans[k][0]))))
         groups[:0] = [(a, k), (k, b)]
     return out
 

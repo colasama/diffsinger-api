@@ -38,6 +38,8 @@ SEPARATOR_MODELS = MODELS / "separator"
 VOCALS_MODEL = os.environ.get("DSAPI_VOCALS_MODEL", "model_bs_roformer_ep_368_sdr_12.9628.ckpt")
 # Strips backing vocals from the separated vocal stem; empty disables it.
 KARAOKE_MODEL = os.environ.get("DSAPI_KARAOKE_MODEL", "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt")
+# Fall back to first-stage vocals for the whole clip on sustained second-stage dropouts.
+KARAOKE_PROTECTION = os.environ.get("DSAPI_KARAOKE_PROTECTION", "1").lower() in ("1", "true", "yes")
 # Keep FP32; compile repeated transformer blocks once per cached model.
 SEPARATOR_COMPILE = os.environ.get("DSAPI_SEPARATOR_COMPILE", "1").lower() in ("1", "true", "yes")
 

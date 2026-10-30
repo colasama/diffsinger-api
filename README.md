@@ -200,11 +200,29 @@ network. Set `DSAPI_NOTE_EXTRACTOR=some` and restart to use the previous extract
 `notes.json` and `job.json` record the chosen extractor; `/runtime` reports its
 configured default. Existing saved tasks keep their original outputs.
 
+Long continuous phrases split at meaningful pauses, balancing equal gaps instead
+of repeatedly isolating individual syllables. GAME receives at least 100 ms of
+analysis context for short regions (right zero-padding only when the whole input
+is too short). Returned notes are clipped to the original region's sample-aligned
+start/end, so analysis context cannot lengthen or shift the score.
+
 Vocal separation defaults to BS-RoFormer `ep_368`
 (`model_bs_roformer_ep_368_sdr_12.9628.ckpt`), followed by the MelBand karaoke
 model for lead vocal extraction. Override the first model with
 `DSAPI_VOCALS_MODEL` and restart the server; missing weights are downloaded on
 first use.
+
+Second-stage dropout protection is enabled by default. If first-stage vocals are
+above -45 dBFS while the second-stage output is below -55 dBFS and at least 20 dB
+quieter for at least 250 ms of suspect audio, the **entire clip** uses first-stage
+vocals for alignment, pitch/note extraction, and the lead preview. Detection uses
+20 ms stereo-energy frames and joins gaps up to 100 ms; it does not splice or mix
+the two outputs. `sep/lead_protection.json` records the decision, thresholds,
+clip-relative anomaly intervals, and selected file. Raw stems stay available.
+This guard can also restore backing vocals; it prioritizes retaining the singer
+when a severe dropout is detected. Set `DSAPI_KARAOKE_PROTECTION=0` and restart
+to disable the guard, or `DSAPI_KARAOKE_MODEL=` to bypass the second stage entirely.
+Existing saved tasks are not rewritten.
 
 Vocal separation uses `audio-separator 0.48.0` with **FP32 + regional
 `torch.compile`** by default (NumPy 2). Both separator models stay cached so

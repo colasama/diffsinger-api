@@ -1,5 +1,6 @@
 """ffmpeg-backed audio helpers and source separation."""
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import numpy as np
 import soundfile as sf
 
 from . import settings
+from .vocal_protection import detect_lead_dropouts
 
 
 def ffmpeg(*args: str) -> None:
@@ -81,7 +83,26 @@ def separate_vocals(src: Path, out_dir: Path) -> tuple[Path, Path]:
     vocals, inst = stems["vocals"], stems["instrumental"]
     if settings.KARAOKE_MODEL:
         kara = _separate(settings.KARAOKE_MODEL, vocals, out_dir / "karaoke")
-        vocals = kara["vocals"]
+        vocals = protect_lead(vocals, kara["vocals"], out_dir)
     lead = out_dir / "lead.wav"
     ffmpeg("-i", str(vocals), "-ac", "1", "-ar", str(settings.SAMPLE_RATE), str(lead))
     return lead, inst
+
+
+def protect_lead(original: Path, separated: Path, out_dir: Path) -> Path:
+    """Use the entire first-stage vocal if the second stage introduces dropouts."""
+    report = {"enabled": settings.KARAOKE_PROTECTION, "mode": "whole_clip",
+              "fallback": False, "reason": "disabled", "detected_intervals": [],
+              "fallback_seconds": 0.0}
+    result = separated
+    if settings.KARAOKE_PROTECTION:
+        vocals, rate = sf.read(original, dtype="float32", always_2d=True)
+        lead, lead_rate = sf.read(separated, dtype="float32", always_2d=True)
+        if rate != lead_rate:
+            raise ValueError("Vocal protection requires matching sample rates")
+        report = detect_lead_dropouts(vocals, lead, rate)
+        if report["fallback"]:
+            result = original
+    report.update(original=str(original), separated=str(separated), output=str(result))
+    (out_dir / "lead_protection.json").write_text(json.dumps(report, indent=2))
+    return result

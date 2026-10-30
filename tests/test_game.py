@@ -64,3 +64,42 @@ def test_absolute_offsets_rests_padding_and_sampling_schedule(language, per_regi
     assert calls == [i/8 for i in range(8)]
     with pytest.raises(ValueError, match="positive"):
         transcribe(np.zeros(1), {}, {}, [], "zh", 0)
+
+
+@pytest.mark.parametrize('length,a,b', [(8820, 4000, 4563), (8820, 0, 563),
+                                      (8820, 8257, 8820), (563, 0, 563), (1, 0, 1)])
+def test_short_regions_get_context_but_notes_stay_inside_original_interval(length, a, b):
+    sr = 44100
+    waveform = np.linspace(.1, .9, length, dtype=np.float32)
+    def encode(inputs):
+        samples = inputs['waveform'][0]
+        assert len(samples) >= 4410  # comfortably beyond both reflect pads
+        assert np.isfinite(samples).all()
+        np.testing.assert_allclose(inputs['duration'], [len(samples) / sr])
+        # Real context is used when available; whole short inputs get right padding.
+        if length < 4410:
+            np.testing.assert_array_equal(samples[:length], waveform)
+            assert not samples[length:].any()
+        else:
+            assert (samples > 0).all()
+            assert samples[0] <= waveform[a] and samples[-1] >= waveform[b - 1]
+        return [np.zeros((1, 10, 2)), np.zeros((1, 10, 2)), np.ones((1, 10), bool)]
+    def dur2bd(inputs):
+        assert (inputs['durations'] > 0).all()
+        np.testing.assert_allclose(inputs['durations'].sum(), .1)
+        return [np.zeros((1, 10), bool)]
+    funcs = {
+        'encoder': encode, 'dur2bd': dur2bd,
+        'segmenter': lambda inputs: [inputs['known_boundaries']],
+        'bd2dur': lambda inputs: [np.array([[.05, .05]], np.float32), np.ones((1, 2), bool)],
+        'estimator': lambda inputs: [np.ones((1, 2), bool), np.array([[60., 62.]])],
+    }
+    sessions = {name: SimpleNamespace(run=lambda _, inputs, fn=fn: fn(inputs)) for name, fn in funcs.items()}
+    notes = transcribe(waveform, {'samplerate': sr, 'languages': {'ja': 2}}, sessions,
+                       [{'start': a / sr, 'end': b / sr, 'boundaries': [a / sr, b / sr]}], 'ja', 1)
+    assert notes
+    assert notes[0]['start'] == pytest.approx(a / sr, abs=1e-9)
+    assert notes[-1]['start'] + notes[-1]['dur'] == pytest.approx(b / sr, abs=1e-9)
+    assert sum(n['dur'] for n in notes) == pytest.approx((b - a) / sr, abs=1e-9)
+    assert all(n['dur'] > 0 and n['start'] >= a / sr and n['start'] + n['dur'] <= b / sr + 1e-9
+               for n in notes)

@@ -8,6 +8,27 @@ import pytest
 from dsapi import extract, lrc, settings, tools
 
 
+def test_long_continuous_phrase_splits_into_balanced_groups_not_single_syllables():
+    # Includes tiny floating-point gaps like those emitted by the aligner.
+    spans = [(i * .25 + (1e-8 if i % 3 else 0), (i + 1) * .25) for i in range(120)]
+    groups = extract._split(spans)
+    assert [i for a, b in groups for i in range(a, b)] == list(range(120))
+    assert len(groups) == 4
+    assert all(6 <= spans[b - 1][1] - spans[a][0] <= extract.MAX_PHRASE for a, b in groups)
+
+
+def test_long_phrase_does_not_peel_off_short_leading_syllable():
+    spans = [(0, .013)] + [(.013 + i * .25, .013 + (i + 1) * .25) for i in range(80)]
+    groups = extract._split(spans)
+    assert groups[0][0] == 0 and groups[0][1] > 1
+    assert all(b - a > 1 for a, b in groups)
+
+
+def test_phrase_splitting_preserves_breaths_and_language_boundaries():
+    spans = [(0, 1), (1, 1.013), (1.013, 2), (2.5, 3)]
+    assert extract._split(spans, ['ja', 'en', 'ja', 'ja']) == [(0, 1), (1, 2), (2, 3), (3, 4)]
+
+
 @pytest.fixture
 def routing(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, 'ALIGNER', 'hubertfa')
