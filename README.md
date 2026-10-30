@@ -27,6 +27,15 @@ uv run dsapi run 3414700455 --start 174 --end 195
 uv run dsapi serve                              # http://127.0.0.1:8765/docs
 ```
 
+Automatic selection evaluates all whole-line LRC windows, aiming for 25 seconds
+(up to 32 seconds before clip padding). It favors continuous lyric coverage,
+avoids estimated lyric gaps over 5 seconds, and uses repetition as a small chorus
+bonus. Songs without repeated lyrics use the same scoring instead of taking the
+first four lines. Instrumental labels are excluded, duplicate timestamps are
+collapsed, and lyrics outside the audio duration are ignored. Selection uses
+lyrics only: incorrect LRC timing or a mismatched audio version can still select
+the wrong passage. Use `--start` and `--end` to select a lyric range manually.
+
 Artifacts land in `work/<task_id>/`: `clip.mp3`, `lead.mp3`, `mimic.mp3`,
 `score.mp3`, `jianpu.txt`, `score.json`, `job.json` (per-stage timings and
 alignment report), and `error.txt` on failure.

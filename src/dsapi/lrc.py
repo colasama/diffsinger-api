@@ -1,8 +1,10 @@
 """LRC parsing and chorus window selection."""
 
+import math
 import re
 from collections import Counter
 from dataclasses import dataclass, field
+from itertools import groupby
 
 from pypinyin import Style, lazy_pinyin
 from pypinyin.constants import PHRASES_DICT
@@ -16,6 +18,10 @@ _META = re.compile(r"^\s*(作词|作曲|编曲|混音|母带|调校|调教|曲�
 _HAN = re.compile(r"[一-鿿]")
 _KANA = re.compile(r"[\u3040-\u30ff]")
 _LATIN = re.compile(r"[A-Za-z]")
+_INSTRUMENTAL = re.compile(
+    r"^(前奏|间奏|尾奏|纯音乐|纯伴奏|无人声|intro|interlude|outro|instrumental)"
+    r"(?:[，,\s]*请欣赏)?$", re.I
+)
 
 
 @dataclass
@@ -100,20 +106,33 @@ def parse(text: str, song_end: float) -> list[Line]:
         times = _TIME.findall(raw)
         body = _TIME.sub("", raw).strip()
         for m, s in times:
-            stamped.append((int(m) * 60 + float(s), body))
+            t = int(m) * 60 + float(s)
+            if float(s) < 60 and 0 <= t < song_end:
+                stamped.append((t, body))
     stamped.sort(key=lambda x: x[0])
+    # Duplicate stamps (including bilingual LRC) share the next *distinct*
+    # timestamp; otherwise the first copy gets a zero-length interval.
+    groups = [(t, [body for _, body in group]) for t, group in groupby(stamped, key=lambda x: x[0])]
     lines = []
-    for i, (t, body) in enumerate(stamped):
-        end = stamped[i + 1][0] if i + 1 < len(stamped) else song_end
-        if body and not _META.match(body) and ":" not in body and "：" not in body:
-            lines.append(Line(t, end, body))
+    for i, (t, bodies) in enumerate(groups):
+        end = groups[i + 1][0] if i + 1 < len(groups) else song_end
+        for body in dict.fromkeys(bodies):
+            marker = body.strip(" \t[]【】()（）<>〈〉「」~～-—….")
+            if (body and not _META.match(body) and ":" not in body and "：" not in body
+                    and not _INSTRUMENTAL.fullmatch(marker)):
+                lines.append(Line(t, end, body))
     lang = detect_lang(lines)
     # An instrumental gap would otherwise be glued onto the line before it.
     per_unit = {"ja": 0.45, "en": 1.2}.get(lang, 0.6)
+    chosen = []
+    seen = set()
     for ln in lines:
         ln.lang = lang
         ln.end = min(ln.end, ln.start + max(2.0, per_unit * len(ln.chars) + 1.5))
-    return [ln for ln in lines if ln.chars]
+        if ln.chars and ln.end > ln.start and ln.start not in seen:
+            chosen.append(ln)
+            seen.add(ln.start)
+    return chosen
 
 
 def _norm(text: str) -> str:
@@ -123,29 +142,45 @@ def _norm(text: str) -> str:
 
 
 def pick_chorus(lines: list[Line], target: float = 25.0, max_len: float = 32.0) -> tuple[int, int]:
-    """Return [i, j) of lines forming the most repeated contiguous block.
+    """Return [i, j) of a continuous, lyric-filled window (ties: earliest).
 
-    Choruses repeat, so each line scores by how often its text appears in the
-    song. The window starts on a repeated line, grows while it fits max_len,
-    and the best mean repetition (ties: earliest) wins.
+    Score every whole-line window, including songs without repeated lyrics.
+    Estimated singing coverage and duration dominate; repetition is a bounded
+    bonus. Never bridge a gap longer than five seconds. These are LRC-derived
+    estimates, not evidence that the audio actually contains vocals.
     """
-    counts = Counter(_norm(ln.text) for ln in lines)
-    best, best_score = (0, min(len(lines), 4)), -1.0
+    if not all(math.isfinite(x) and x > 0 for x in (target, max_len)):
+        raise ValueError("target and max_len must be finite and positive")
+    target = min(target, max_len)
+    valid = [math.isfinite(ln.start) and math.isfinite(ln.end)
+             and 0 <= ln.start < ln.end and bool(ln.chars) for ln in lines]
+    norms = [_norm(ln.text) if ok else "" for ln, ok in zip(lines, valid)]
+    counts = Counter(norm for norm in norms if norm)
+    best, best_score = (0, 0), -math.inf
     for i, ln in enumerate(lines):
-        if counts[_norm(ln.text)] < 2:
+        if not valid[i]:
             continue
-        j = i
-        while j < len(lines) and lines[j].end - ln.start <= max_len:
-            j += 1
-        if j == i:
-            continue
-        # Prefer windows around target length, not just the longest.
-        span = lines[j - 1].end - ln.start
-        score = sum(counts[_norm(x.text)] for x in lines[i:j]) / (j - i)
-        score -= abs(span - target) / target
-        # Unsingable lines were dropped in parse(), leaving holes; avoid windows full of them.
-        coverage = sum(x.end - x.start for x in lines[i:j]) / span
-        score -= 1.5 * (1 - min(coverage, 1.0))
-        if score > best_score:
-            best, best_score = (i, j), score
+        covered = repetition = longest_gap = 0.0
+        right = ln.start
+        for j in range(i, len(lines)):
+            line = lines[j]
+            if not valid[j] or (j > i and line.start < lines[j - 1].start):
+                break
+            gap = max(0.0, line.start - right)
+            end = max(right, line.end)
+            span = end - ln.start
+            if gap > 5.0 or span > max_len:
+                break
+            # Union of intervals: overlapping lyrics must not inflate coverage.
+            covered += max(0.0, line.end - max(right, line.start))
+            right = end
+            longest_gap = max(longest_gap, gap)
+            repetition += min(max(counts[norms[j]] - 1, 0), 2) / 2
+            score = (3.0 * covered / span
+                     + 2.0 * min(covered / target, 1.0)
+                     - abs(span - target) / target
+                     - longest_gap / target
+                     + 0.5 * repetition / (j - i + 1))
+            if score > best_score:
+                best, best_score = (i, j + 1), score
     return best
