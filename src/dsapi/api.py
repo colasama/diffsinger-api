@@ -9,13 +9,18 @@ POST /evaluate?task_id=  objective quality metrics (see evaluate.py)
 GET  /tasks, /search?q=  helpers for the optional web UI (DSAPI_WEBUI=1, served at /ui)
 """
 
+import asyncio
 import json
 import os
+import re
+import shutil
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
+from threading import Lock
 
 import numpy as np
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
@@ -23,17 +28,33 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import audio, onnx_backend, settings, sources
+from . import audio, onnx_backend, settings, sources, tools
 from .pipeline import Job, JobSpec, voicebank
 from .score import Note, Phrase, Syllable, render_score
 
 API_KEY = os.environ.get("DSAPI_KEY", "")
 ATTRIBUTION = "AI 合成 · 声库：用户固定音源 · 引擎：DiffSinger"
 
-app = FastAPI(title="dsapi")
 # Separation and torch models are memory heavy; run one job at a time.
 _executor = ThreadPoolExecutor(max_workers=1)
 _jobs: dict[str, Job] = {}
+_job_futures: dict[str, Future] = {}
+_delete_lock = Lock()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _executor
+    _executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        yield
+    finally:
+        # Finish queued jobs before closing their model workers.
+        await asyncio.to_thread(_executor.shutdown, wait=True)
+        await asyncio.to_thread(tools.close_workers)
+
+
+app = FastAPI(title="dsapi", lifespan=lifespan)
 
 
 def auth(authorization: str = Header(default=""), key: str = Query(default="")) -> None:
@@ -54,7 +75,7 @@ def release_task(body: TaskIn) -> dict:
     task_id = uuid.uuid4().hex[:12]
     job = Job(task_id, JobSpec(song_id=body.song_id, start=body.start, end=body.end, modes=body.modes))
     _jobs[task_id] = job
-    _executor.submit(job.run)
+    _job_futures[task_id] = _executor.submit(job.run)
     return {"task_id": task_id}
 
 
@@ -88,15 +109,24 @@ def release_task_upload(audio_file: UploadFile = File(...), lrc_file: UploadFile
     job = Job(task_id, JobSpec(audio_path=str(audio_path), lrc_path=str(d / "lyrics.lrc"), start=start, end=end,
                                modes=[m for m in modes.split(",") if m]))
     _jobs[task_id] = job
-    _executor.submit(job.run)
+    _job_futures[task_id] = _executor.submit(job.run)
     return {"task_id": task_id}
 
 
+def _task_dir(task_id: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", task_id):
+        raise HTTPException(404, "unknown task")
+    path = settings.WORK / task_id
+    if path.is_symlink():
+        raise HTTPException(404, "unknown task")
+    return path
+
+
 def _state(task_id: str) -> dict:
+    path = _task_dir(task_id) / "job.json"
     if task_id in _jobs:
         return asdict(_jobs[task_id].state)
-    path = settings.WORK / task_id / "job.json"
-    if not path.is_file() or "/" in task_id:
+    if not path.is_file():
         raise HTTPException(404, "unknown task")
     return json.loads(path.read_text())
 
@@ -183,17 +213,41 @@ def render(body: ScoreIn) -> FileResponse:
 
 @app.get("/tasks", dependencies=[Depends(auth)])
 def tasks(limit: int = 30) -> list[dict]:
-    jobs = sorted(settings.WORK.glob("*/job.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:limit]
-    out = []
-    for path in jobs:
-        st = json.loads(path.read_text())
-        out.append({k: st.get(k) for k in ("task_id", "status", "stage", "song", "window", "error")})
+    with _delete_lock:
+        jobs = sorted(settings.WORK.glob("*/job.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:limit]
+        out = []
+        for path in jobs:
+            st = json.loads(path.read_text())
+            out.append({k: st.get(k) for k in ("task_id", "status", "stage", "song", "window", "error")})
     return out
+
+
+@app.delete("/tasks/{task_id}", dependencies=[Depends(auth)])
+def delete_task(task_id: str) -> dict:
+    with _delete_lock:
+        directory = _task_dir(task_id)
+        state = _state(task_id)
+        future = _job_futures.get(task_id)
+        # A terminal status can appear just before the worker's final save.
+        if state["status"] not in {"done", "failed"} or (future is not None and not future.done()):
+            raise HTTPException(409, "cannot delete a queued or running task")
+        uploads = settings.WORK / "uploads" / task_id
+        if uploads.resolve().parent != (settings.WORK.resolve() / "uploads") or uploads.is_symlink():
+            raise HTTPException(409, "unsafe upload directory")
+        if uploads.exists():
+            shutil.rmtree(uploads)
+        if directory.exists():
+            shutil.rmtree(directory)
+        _jobs.pop(task_id, None)
+        _job_futures.pop(task_id, None)
+    return {"task_id": task_id, "deleted": True}
 
 
 @app.get("/runtime", dependencies=[Depends(auth)])
 def runtime() -> dict:
-    return {"synthesis": onnx_backend.backend_status()}
+    return {"synthesis": onnx_backend.backend_status(), "workers": tools.worker_status(),
+            "alignment": {lang: tools.alignment_backend(lang) for lang in ("zh", "ja", "en")},
+            "note_extraction": {"backend": tools.note_backend(), "game_steps": settings.GAME_STEPS}}
 
 
 @app.get("/search", dependencies=[Depends(auth)])

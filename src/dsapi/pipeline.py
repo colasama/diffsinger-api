@@ -43,6 +43,7 @@ class JobState:
     window: list[float] | None = None
     lines: list[dict] = field(default_factory=list)
     alignment: list[dict] = field(default_factory=list)
+    note_extraction: dict | None = None
     grid: dict | None = None
     tonic: str | None = None
     jianpu: str | None = None
@@ -127,7 +128,7 @@ class Job:
                 i, j = lrc.pick_chorus(lines)
                 chosen = lines[i:j]
             if not chosen:
-                raise RuntimeError("no singable Chinese lyric lines in the window")
+                raise RuntimeError("no singable lyric lines in the window")
             # LRC stamps can run ~1s late; leave room before the first line.
             start = max(0.0, chosen[0].start - 1.5)
             end = min(duration, chosen[-1].end + 1.0, start + MAX_CLIP)
@@ -145,15 +146,29 @@ class Job:
             lead_path, inst_path = audio.separate_vocals(clip, d / "sep")
             lead = audio.load(lead_path)
 
-        with self.stage("notes_f0"):
-            notes, f0, _ = tools.extract_notes_f0(lead_path, d)
-
         with self.stage("align"):
             segs = extract.write_segments(chosen, lead, d / "segments", vb, before=before, after=after,
                                           clip_start=start)
             if not segs:
                 raise RuntimeError("no lyric units the voicebank can sing in this window")
-            sofa = tools.align(d / "segments", d, Path(segs[0]["ckpt"]), Path(segs[0]["dictionary"]))
+            sofa = tools.align(d / "segments", d, Path(segs[0]["ckpt"]), Path(segs[0]["dictionary"]),
+                               backend=segs[0]["backend"], lang=segs[0]["lang"])
+
+        with self.stage("notes_f0"):
+            backend = tools.note_backend()
+            if backend == "game-medium":
+                f0, _ = tools.extract_f0(lead_path, d)
+                # Alignment and F0 alone establish phrase/vowel boundaries;
+                # GAME predicts notes conditioned on them, without loading SOME.
+                regions, _ = extract.build_phrases(vb, segs, sofa, [], f0)
+                if not regions:
+                    raise RuntimeError("alignment produced no usable phrases")
+                notes = tools.extract_game_notes(lead_path, d, regions, segs[0]["lang"])
+            else:
+                notes, f0, _ = tools.extract_some_notes_f0(lead_path, d)
+            meta = json.loads((d / "notes.json").read_text())
+            st.note_extraction = {k: v for k, v in meta.items() if k != "notes"}
+            st.note_extraction.setdefault("backend", backend)
 
         with self.stage("build"):
             phrases, report = extract.build_phrases(vb, segs, sofa, notes, f0)

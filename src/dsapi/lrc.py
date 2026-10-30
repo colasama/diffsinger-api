@@ -28,13 +28,17 @@ class Line:
 
     @property
     def units(self) -> list[tuple[str, str]]:
-        """[(display, grapheme)] per sung unit: Han char + pinyin, or kana mora + romaji."""
+        """[(display, grapheme)]: Han/pinyin, kana/romaji, or English words."""
         if self._units is None:
             self._units = self._compute_units()
         return self._units
 
     def _compute_units(self) -> list[tuple[str, str]]:
         han = _HAN.findall(self.text)
+        if self.lang == "en":
+            from .english import words
+
+            return [] if han or _KANA.search(self.text) else words(self.text)
         if self.lang == "ja":
             from . import japanese
 
@@ -58,13 +62,17 @@ class Line:
 
 
 def detect_lang(lines: list["Line"]) -> str:
-    """Song-level: Japanese when kana shows up in a good share of lyric lines.
+    """Song-level: English majority, otherwise optionally Japanese or Mandarin.
 
     Japanese is experimental (alignment is not validated yet) and off unless
     DSAPI_EXPERIMENTAL_JA=1; otherwise kana lines are simply dropped as before.
     """
     import os
 
+    latin = sum(bool(_LATIN.search(ln.text)) and not (_HAN.search(ln.text) or _KANA.search(ln.text))
+                for ln in lines)
+    if latin > len(lines) / 2:
+        return "en"
     if os.environ.get("DSAPI_EXPERIMENTAL_JA", "") != "1":
         return "zh"
     cjk = [ln for ln in lines if _HAN.search(ln.text) or _KANA.search(ln.text)]
@@ -101,7 +109,7 @@ def parse(text: str, song_end: float) -> list[Line]:
             lines.append(Line(t, end, body))
     lang = detect_lang(lines)
     # An instrumental gap would otherwise be glued onto the line before it.
-    per_unit = 0.45 if lang == "ja" else 0.6  # morae go by faster than Han syllables
+    per_unit = {"ja": 0.45, "en": 1.2}.get(lang, 0.6)
     for ln in lines:
         ln.lang = lang
         ln.end = min(ln.end, ln.start + max(2.0, per_unit * len(ln.chars) + 1.5))
@@ -109,7 +117,9 @@ def parse(text: str, song_end: float) -> list[Line]:
 
 
 def _norm(text: str) -> str:
-    return "".join(_HAN.findall(text) + _KANA.findall(text))
+    from .english import words
+
+    return "".join(_HAN.findall(text) + _KANA.findall(text)) or " ".join(w for _, w in words(text))
 
 
 def pick_chorus(lines: list[Line], target: float = 25.0, max_len: float = 32.0) -> tuple[int, int]:

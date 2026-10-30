@@ -55,7 +55,12 @@ def _separate(model: str, src: Path, out_dir: Path) -> dict[str, Path]:
     sep = _separators.get(model)
     if sep is None:
         sep = Separator(model_file_dir=str(settings.SEPARATOR_MODELS), output_dir=str(out_dir), output_format="WAV",
-                        sample_rate=settings.SAMPLE_RATE)
+                        sample_rate=settings.SAMPLE_RATE, use_autocast=False, use_native_fp16=False,
+                        use_torch_compile=settings.SEPARATOR_COMPILE,
+                        # 0.48 uses a window count. One preserves the previous
+                        # 8-second stride for our two 8-second RoFormer models.
+                        mdxc_params={"segment_size": 256, "override_model_segment_size": False,
+                                     "batch_size": 1, "overlap": 1, "pitch_shift": 0})
         sep.load_model(model_filename=model)
         _separators[model] = sep
     sep.output_dir = str(out_dir)

@@ -29,7 +29,7 @@ class Note:
 @dataclass
 class Syllable:
     text: str
-    pinyin: str  # pinyin for zh, romaji mora unit for ja
+    pinyin: str  # zh pinyin, ja romaji, or en word~syllable-index
     notes: list[Note]  # >1 note means a slur (melisma)
     lang: str = "zh"
 

@@ -55,6 +55,9 @@ class _WebGpuSession:
     def get_providers(self):
         return self._session.get_providers()
 
+    def get_outputs(self):
+        return self._session.get_outputs()
+
 
 OnnxSession = ort.InferenceSession | _WebGpuSession
 

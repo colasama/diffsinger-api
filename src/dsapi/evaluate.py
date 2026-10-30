@@ -1,7 +1,7 @@
 """Objective checks for a finished task, since nobody listens in CI.
 
 - mimic pitch: rendered f0 vs the source f0 it was given (cents)
-- mimic intelligibility: re-align the render against the same lyrics with SOFA
+- mimic intelligibility: re-align the render with the task's original aligner
   and compare word onsets with the source alignment
 - score pitch: rendered f0 per note vs the quantized score's midi
 """
@@ -48,7 +48,8 @@ def evaluate(task_dir: Path) -> dict:
         (realign / "clip.lab").write_text(" ".join(seg), encoding="utf8")
         meta = json.loads((task_dir / "align_meta.json").read_text()) if (task_dir / "align_meta.json").is_file() else {}
         res = tools.align(realign, realign, Path(meta.get("ckpt", settings.SOFA_CKPT)),
-                          Path(meta.get("dictionary", settings.SOFA_DICT)))["clip"]
+                          Path(meta.get("dictionary", settings.SOFA_DICT)),
+                          backend=meta.get("backend", "sofa"), lang=meta.get("lang", "zh"))["clip"]
         src_words = [w for w in sofa["words"] if w[0] not in ("SP", "AP")]
         out_words = [w for w in res["words"] if w[0] not in ("SP", "AP")]
         # Only words that were actually rendered (context lines are silent in the render).
@@ -56,8 +57,8 @@ def evaluate(task_dir: Path) -> dict:
                     if np.any(np.abs(audio.load(task_dir / "mimic.wav")[int(w[1] * settings.SAMPLE_RATE):
                                                                        int(w[2] * settings.SAMPLE_RATE)]) > 1e-3)]
         diffs = np.array([abs(out_words[i][1] - src_words[i][1]) for i in rendered]) * 1000
-        out["mimic_intelligibility"] = {"realign_confidence": round(res["confidence"], 3),
-                                        "source_confidence": round(sofa["confidence"], 3),
+        out["mimic_intelligibility"] = {"realign_confidence": round(res["confidence"], 3) if res.get("confidence") is not None else None,
+                                        "source_confidence": round(sofa["confidence"], 3) if sofa.get("confidence") is not None else None,
                                         "onset_median_ms": round(float(np.median(diffs)), 1),
                                         "onset_within_50ms": round(float(np.mean(diffs < 50)), 3),
                                         "words": len(rendered)}

@@ -1,4 +1,4 @@
-"""Turn SOFA alignment + SOME notes + f0 into Phrases."""
+"""Turn phoneme alignment, transcribed notes and F0 into phrases."""
 
 from pathlib import Path
 
@@ -6,7 +6,7 @@ import json
 
 import numpy as np
 
-from . import audio, japanese, settings
+from . import audio, japanese, settings, tools
 from .lrc import Line
 from .score import Note, Phrase, Syllable
 from .voicebank import Voicebank, hz_to_midi
@@ -35,7 +35,7 @@ def _in_clip(ln: Line, lo: float, hi: float) -> list[tuple[str, str]]:
 
 def write_segments(lines: list[Line], lead: np.ndarray, seg_dir: Path, vb: Voicebank,
                    before: list[Line] = (), after: list[Line] = (), clip_start: float = 0.0) -> list[dict]:
-    """The whole clip as one SOFA input carrying every line's syllables.
+    """The whole clip as one alignment input carrying every line's syllables.
 
     LRC timestamps are often off by most of a second, so cutting per line
     slices words in half; a single global forced alignment avoids trusting them.
@@ -44,9 +44,11 @@ def write_segments(lines: list[Line], lead: np.ndarray, seg_dir: Path, vb: Voice
     """
     seg_dir.mkdir(parents=True, exist_ok=True)
     lang = lines[0].lang if lines else "zh"
+    backend = tools.alignment_backend(lang)
     if lang == "zh":
-        sofa_known = sofa_words()
-        known = lambda g: g in sofa_known and vb.knows(g, "zh")  # noqa: E731
+        dictionary = settings.HUBERTFA_DICT if backend == "hubertfa" else settings.SOFA_DICT
+        aligner_known = {ln.split("\t", 1)[0] for ln in dictionary.read_text(encoding="utf8").splitlines() if ln}
+        known = lambda g: g in aligner_known and vb.knows(g, "zh")  # noqa: E731
     else:
         known = lambda g: vb.knows(g, lang)  # noqa: E731
     chars, pinyin, line_of = [], [], []
@@ -56,6 +58,9 @@ def write_segments(lines: list[Line], lead: np.ndarray, seg_dir: Path, vb: Voice
               + [(-1, _in_clip(ln, clip_start, clip_end + 0.3)) for ln in after])
     for k, units in tagged:
         for c, py in units:
+            if (lang == "en" or (lang == "ja" and backend == "hubertfa")) and not known(py):
+                language = "English" if lang == "en" else "Japanese"
+                raise ValueError(f"{language} word missing from voicebank dictionary: {py}")
             if known(py):
                 chars.append(c)
                 pinyin.append(py)
@@ -64,8 +69,18 @@ def write_segments(lines: list[Line], lead: np.ndarray, seg_dir: Path, vb: Voice
         return []
     audio.save(seg_dir / "clip.wav", lead)
     (seg_dir / "clip.lab").write_text(" ".join(pinyin), encoding="utf8")
-    if lang == "zh":
-        ckpt, dictionary = settings.SOFA_CKPT, settings.SOFA_DICT
+    if backend == "hubertfa" and lang in ("en", "ja"):
+        ckpt, dictionary = settings.HUBERTFA_MODEL, seg_dir.parent / "hubertfa_dict.txt"
+        vocab = json.loads((ckpt.parent / "vocab.json").read_text())["vocab"]
+        unknown = {p for u in pinyin for p in vb.g2p(u, lang)
+                   if ("cl" if p == "ja/cl" else p) not in vocab}
+        if unknown:
+            raise ValueError(f"Phonemes missing from HubertFA {lang} vocabulary: {sorted(unknown)}")
+        dictionary.write_text("".join(
+            f"{u}\t{' '.join(p.removeprefix(lang + '/') for p in vb.g2p(u, lang))}\n"
+            for u in sorted(set(pinyin))), encoding="utf8")
+    elif lang == "zh":
+        ckpt = settings.HUBERTFA_MODEL if backend == "hubertfa" else settings.SOFA_CKPT
     else:
         # One entry per unit actually sung, one SOFA phoneme per voicebank phoneme,
         # so the alignment maps back onto the voicebank 1:1.
@@ -73,7 +88,7 @@ def write_segments(lines: list[Line], lead: np.ndarray, seg_dir: Path, vb: Voice
         dictionary.write_text("".join(
             f"{u}\t{' '.join(japanese.sofa_phoneme(p) for p in vb.g2p(u, lang))}\n" for u in sorted(set(pinyin))),
             encoding="utf8")
-    meta = {"lang": lang, "ckpt": str(ckpt), "dictionary": str(dictionary)}
+    meta = {"backend": backend, "lang": lang, "ckpt": str(ckpt), "dictionary": str(dictionary)}
     (seg_dir.parent / "align_meta.json").write_text(json.dumps(meta))
     return [{"name": "clip", "offset": 0.0, "chars": chars, "pinyin": pinyin, "line_of": line_of,
              "texts": [ln.text for ln in lines], **meta}]
@@ -81,7 +96,7 @@ def write_segments(lines: list[Line], lead: np.ndarray, seg_dir: Path, vb: Voice
 
 def _map_phones(vb: Voicebank, py: str, sofa: list[tuple[str, float, float]], lang: str = "zh"
                 ) -> list[tuple[str, float, float]]:
-    """Rename SOFA (opencpop) phonemes of one syllable to voicebank phonemes."""
+    """Map aligned phonemes onto the voicebank without moving matched boundaries."""
     target = vb.g2p(py, lang)
     if len(target) == len(sofa):
         return [(t, s, e) for t, (_, s, e) in zip(target, sofa)]
@@ -185,6 +200,22 @@ def build_phrases(vb: Voicebank, segs: list[dict], sofa: dict, notes: list[dict]
 
             syls = []
             for i in range(a, b):
+                if seg["lang"] == "en":
+                    from .english import phone_groups
+
+                    mapped = word_phones[i]
+                    groups = phone_groups([p for p, _, _ in mapped], vb.vowels)
+                    for j, (ga, gb) in enumerate(groups):
+                        chunk = mapped[ga:gb]
+                        s = next((s for p, s, _ in chunk if vb.is_vowel(p)), chunk[0][1])
+                        e = (next((s for p, s, _ in mapped[gb:] if vb.is_vowel(p)), mapped[gb][1])
+                             if j + 1 < len(groups) else spans[i][1])
+                        if j + 1 == len(groups) and i + 1 < b and 0 <= spans[i + 1][0] - e < CONSONANT_GAP:
+                            e = spans[i + 1][0]
+                        syls.append(Syllable(seg["chars"][i] if j == 0 else "·",
+                                            f"{seg['pinyin'][i]}~{j}",
+                                            _syllable_notes(s, e, notes, f0_midi), "en"))
+                    continue
                 s, e = spans[i]
                 if i + 1 < b and 0 <= spans[i + 1][0] - e < CONSONANT_GAP:
                     e = spans[i + 1][0]  # the next consonant still belongs to this note
@@ -192,7 +223,8 @@ def build_phrases(vb: Voicebank, segs: list[dict], sofa: dict, notes: list[dict]
                                      seg["lang"]))
             phrases.append(Phrase(syls, phones=phones, f0_midi=f0_midi[int(round(lo * fps)):]))
             lines = sorted({seg["line_of"][i] for i in range(a, b)})
-            report.append({"line": "".join(seg["chars"][a:b]), "lrc_lines": [seg["texts"][k] for k in lines],
-                           "start": round(word_spans[a][0], 2), "confidence": round(res["confidence"], 3),
-                           "syllables": b - a, "notes": sum(len(x.notes) for x in syls)})
+            report.append({"line": (" " if seg["lang"] == "en" else "").join(seg["chars"][a:b]), "lrc_lines": [seg["texts"][k] for k in lines],
+                           "start": round(word_spans[a][0], 2), "backend": seg.get("backend", "sofa"),
+                           "confidence": round(res["confidence"], 3) if res.get("confidence") is not None else None,
+                           "syllables": len(syls), "notes": sum(len(x.notes) for x in syls)})
     return phrases, report

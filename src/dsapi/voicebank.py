@@ -15,7 +15,7 @@ import yaml
 from . import settings
 from .onnx_backend import OnnxSession, create_session
 
-LANGS = ("zh", "ja")
+LANGS = ("zh", "ja", "en")
 
 
 def _session(path: Path) -> OnnxSession:
@@ -128,6 +128,18 @@ class Voicebank:
     def g2p(self, grapheme: str, lang: str = "zh") -> list[str]:
         """Pinyin (zh) or a romaji mora unit such as "mo_cl" (ja) -> phonemes."""
         entries = self.dictionaries[lang]
+        if lang == "en" and "~" in grapheme:
+            from .english import phone_groups
+
+            word, index = grapheme.rsplit("~", 1)
+            phones = entries.get(word)
+            if phones is None or not index.isdigit():
+                raise KeyError(grapheme)
+            groups = phone_groups(phones, self.vowels)
+            if int(index) >= len(groups):
+                raise KeyError(grapheme)
+            a, b = groups[int(index)]
+            return phones[a:b]
         if lang == "ja":
             from .japanese import unit_phonemes
 

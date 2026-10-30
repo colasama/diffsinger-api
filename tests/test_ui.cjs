@@ -15,6 +15,64 @@ function silentWav() {
   return data;
 }
 
+test('delete confirms, handles errors, clears selection and protects active tasks', { timeout: 30000 }, async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    const html = readFileSync(join(__dirname, '../src/dsapi/static/index.html'), 'utf8');
+    let tasks = ['failed', 'done', 'running', 'queued'].map(status => ({
+      task_id: status, status, spec: {}, timings: {}, outputs: {}, song: { name: status },
+      alignment: [{ line: '过', backend: 'hubertfa', confidence: null, syllables: 1, notes: 1 }]
+    }));
+    let deletes = 0, reject = false, accept = false;
+    page.on('dialog', dialog => dialog.type() === 'confirm' && !accept ? dialog.dismiss() : dialog.accept());
+    await page.route('http://dsapi.test/**', route => {
+      const url = new URL(route.request().url());
+      if (url.pathname === '/ui/') return route.fulfill({ contentType: 'text/html', body: html });
+      if (url.pathname === '/tasks') return route.fulfill({ json: tasks });
+      if (route.request().method() === 'DELETE') {
+        deletes++;
+        assert.equal(url.searchParams.get('key'), 'secret');
+        if (reject) return route.fulfill({ status: 409, body: 'task busy' });
+        tasks = tasks.filter(t => t.task_id !== url.pathname.split('/').pop());
+        return route.fulfill({ json: { deleted: true } });
+      }
+      if (url.pathname === '/query_result') return route.fulfill({ json: tasks.find(t => t.task_id === url.searchParams.get('task_id')) });
+      return route.fulfill({ status: 404 });
+    });
+    await page.goto('http://dsapi.test/ui/');
+    await page.locator('#apikey').fill('secret');
+    const row = id => page.locator(`#tasks li[data-id="${id}"]`);
+    await row('failed').waitFor();
+    assert.equal(await row('running').locator('button').isDisabled(), true);
+    assert.equal(await row('queued').locator('button').isDisabled(), true);
+    await row('failed').locator('button').click();
+    assert.equal(deletes, 0);
+    assert.match(await page.locator('#detail').textContent(), /选择或提交/);
+    await row('failed').locator('span').first().click();
+    await page.locator('#taskStatus').waitFor();
+    assert.equal(await page.locator('#taskExtras table tr').nth(1).locator('td').nth(1).textContent(), '—');
+    accept = true;
+    reject = true;
+    await row('failed').locator('button').click();
+    await page.waitForFunction(() => !document.querySelector('[data-id="failed"] button').disabled);
+    assert.equal(deletes, 1);
+    assert.equal(await page.locator('#detail').getAttribute('data-task-id'), 'failed');
+    reject = false;
+    await row('failed').locator('button').click();
+    await row('failed').waitFor({ state: 'detached' });
+    assert.match(await page.locator('#detail').textContent(), /任务已删除/);
+    assert.equal(await page.locator('#taskPlayers').count(), 0);
+    assert.equal(await page.evaluate(() => current === null && elapsedClock === null), true);
+    await row('done').locator('button').click();
+    await row('done').waitFor({ state: 'detached' });
+    assert.equal(await page.locator('#tasks li').count(), 2);
+    assert.deepEqual(errors, []);
+  } finally { await browser.close(); }
+});
+
 test('audio survives polling and completion; elapsed time advances and freezes', { timeout: 30000 }, async () => {
   const browser = await chromium.launch({ headless: true });
   try {

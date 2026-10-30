@@ -34,6 +34,8 @@ textarea { font-family: var(--mono); font-size: 12px; min-height: 220px; resize:
 .checks input { width: auto; }
 button { padding: 7px 14px; border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 6px; font: inherit; cursor: pointer; }
 button.ghost { background: transparent; color: var(--accent); }
+button.danger { background: transparent; color: var(--bad); border-color: var(--line); padding: 3px 8px; font-size: 12px; }
+.task-actions { display: flex; align-items: center; gap: 8px; }
 button:disabled { opacity: .5; cursor: default; }
 .list { list-style: none; margin: 0; padding: 0; }
 .list li { padding: 7px 8px; border-radius: 6px; cursor: pointer; display: flex; justify-content: space-between; gap: 8px; }
@@ -114,13 +116,15 @@ th { color: var(--muted); font-weight: 500; }
   </div>
 </main>
 <script>
-const STAGES = ["fetch", "select", "separate", "notes_f0", "align", "build", "quantize", "render_mimic", "render_score"];
+const STAGES = ["fetch", "select", "separate", "align", "notes_f0", "build", "quantize", "render_mimic", "render_score"];
 const STAGE_NAMES = { fetch: "取歌", select: "选段", separate: "人声分离", notes_f0: "音符/F0", align: "歌词对齐",
   build: "组装", quantize: "量化/简谱", render_mimic: "模仿渲染", render_score: "乐谱渲染" };
 const OUT_NAMES = { clip: "原曲片段", lead: "分离人声", mimic: "模仿模式", score: "乐谱模式" };
 const $ = (id) => document.getElementById(id);
 let current = null, timer = null;
 let elapsedClock = null;
+const deleting = new Set();
+let taskListVersion = 0;
 
 const keyStore = { get() { try { return localStorage.getItem("dsapi.key") || ""; } catch { return ""; } },
                    set(v) { try { localStorage.setItem("dsapi.key", v); } catch {} } };
@@ -210,12 +214,40 @@ $("submit").onclick = async () => {
 };
 
 async function loadTasks() {
+  const version = ++taskListVersion;
   try {
     const list = await (await api("/tasks")).json();
-    $("tasks").innerHTML = list.map((t) => `<li data-id="${t.task_id}" class="${t.task_id === current ? "active" : ""}"><span style="min-width:0">${esc(t.song?.name || t.task_id)}<div class="sub">${esc(t.task_id)}${t.window ? " · " + t.window.map(fmtTime).join("–") : ""}</div></span><span class="badge ${t.status}">${t.status}</span></li>`).join("") || `<li class="muted">暂无任务</li>`;
-  } catch (e) { $("tasks").innerHTML = `<li class="err">${esc(e.message)}</li>`; }
+    if (version !== taskListVersion) return;
+    $("tasks").innerHTML = list.map((t) => `<li data-id="${esc(t.task_id)}" class="${t.task_id === current ? "active" : ""}"><span style="min-width:0">${esc(t.song?.name || t.task_id)}<div class="sub">${esc(t.task_id)}${t.window ? " · " + t.window.map(fmtTime).join("–") : ""}</div></span><span class="task-actions"><span class="badge ${esc(t.status)}">${esc(t.status)}</span><button class="danger" data-delete title="删除任务及其音频文件" aria-label="删除 ${esc(t.song?.name || t.task_id)}" ${!["done", "failed"].includes(t.status) || deleting.has(t.task_id) ? "disabled" : ""}>${deleting.has(t.task_id) ? "删除中…" : "删除"}</button></span></li>`).join("") || `<li class="muted">暂无任务</li>`;
+  } catch (e) { if (version === taskListVersion) $("tasks").innerHTML = `<li class="err">${esc(e.message)}</li>`; }
 }
-$("tasks").onclick = (e) => { const li = e.target.closest("li[data-id]"); if (li) select(li.dataset.id); };
+$("tasks").onclick = (e) => {
+  const li = e.target.closest("li[data-id]");
+  if (!li) return;
+  const button = e.target.closest("button[data-delete]");
+  if (button) { if (!button.disabled) deleteTask(li.dataset.id, button); return; }
+  select(li.dataset.id);
+};
+
+async function deleteTask(id, button) {
+  if (deleting.has(id) || !confirm("删除此任务？对应的音频、乐谱、上传文件和日志也会被删除，无法恢复。")) return;
+  deleting.add(id);
+  button.disabled = true;
+  button.textContent = "删除中…";
+  try {
+    await api(`/tasks/${encodeURIComponent(id)}`, { method: "DELETE" });
+    ++taskListVersion;
+    if (current === id) {
+      current = null;
+      clearTimeout(timer);
+      elapsedClock = null;
+      $("detail").innerHTML = '<p class="muted">任务已删除。请选择或提交一个任务。</p>';
+      delete $("detail").dataset.taskId;
+    }
+    button.closest("li").remove();
+  } catch (e) { alert(`删除失败：${e.message}`); }
+  finally { deleting.delete(id); await loadTasks(); }
+}
 $("refresh").onclick = () => { loadTasks(); loadRuntime(); };
 
 function select(id) {
@@ -305,7 +337,7 @@ function renderDetail(st) {
   }
   elapsedClock = { taskId: st.task_id, status: st.status, seconds: total,
     running: st.status === "running", at: performance.now() };
-  const align = (st.alignment || []).map((a) => `<tr><td>${esc(a.line)}</td><td>${a.error ? `<span class="failed">${esc(a.error)}</span>` : (a.confidence ?? 0).toFixed(2)}</td><td>${a.syllables ?? ""}</td><td>${a.notes ?? ""}</td></tr>`).join("");
+  const align = (st.alignment || []).map((a) => `<tr><td>${esc(a.line)}</td><td>${a.error ? `<span class="failed">${esc(a.error)}</span>` : (a.confidence == null ? "—" : a.confidence.toFixed(2))}</td><td>${a.syllables ?? ""}</td><td>${a.notes ?? ""}</td></tr>`).join("");
   $("taskSummary").innerHTML = `
     <div class="head">
       <h2>${esc(st.song?.name || st.task_id)} ${st.song?.artists ? `<span class="muted" style="text-transform:none">· ${esc(st.song.artists.join(" / "))}</span>` : ""}</h2>
@@ -333,7 +365,7 @@ function renderDetail(st) {
   const pct = (v) => v == null ? "–" : (v * 100).toFixed(1) + "%";
   const rows = !ev ? "" : [
     ev.mimic_pitch && ["模仿 · 音高", `中位误差 ${ev.mimic_pitch.median_cents} 音分`, `${pct(ev.mimic_pitch.within_50c)} 帧在 50 音分内`],
-    ev.mimic_intelligibility && ["模仿 · 咬字", `重对齐起点中位偏差 ${ev.mimic_intelligibility.onset_median_ms} ms`, `${pct(ev.mimic_intelligibility.onset_within_50ms)} 字在 50 ms 内 · 置信度 ${ev.mimic_intelligibility.realign_confidence}（原唱 ${ev.mimic_intelligibility.source_confidence}）`],
+    ev.mimic_intelligibility && ["模仿 · 咬字", `重对齐起点中位偏差 ${ev.mimic_intelligibility.onset_median_ms} ms`, `${pct(ev.mimic_intelligibility.onset_within_50ms)} 字在 50 ms 内 · 置信度 ${ev.mimic_intelligibility.realign_confidence ?? "—"}（原唱 ${ev.mimic_intelligibility.source_confidence ?? "—"}）`],
     ev.score_pitch && ["乐谱 · 音准", `${pct(ev.score_pitch.notes_on_pitch)} 音符在谱面音高`, `${ev.score_pitch.notes} 个音符`],
   ].filter(Boolean).map((r) => `<tr><td>${r[0]}</td><td>${r[1]}</td><td class="muted">${r[2]}</td></tr>`).join("");
   return `<div class="head" style="margin-top:14px"><h2>客观评估</h2><button class="ghost" id="evalBtn">${ev ? "重新评估" : "运行评估"}</button></div>
@@ -350,7 +382,7 @@ function evalBlock(st) {
   const pct = (v) => v == null ? "–" : (v * 100).toFixed(1) + "%";
   const rows = !ev ? "" : [
     ev.mimic_pitch && ["模仿 · 音高", `中位误差 ${ev.mimic_pitch.median_cents} 音分`, `${pct(ev.mimic_pitch.within_50c)} 帧在 50 音分内`],
-    ev.mimic_intelligibility && ["模仿 · 咬字", `重对齐起点中位偏差 ${ev.mimic_intelligibility.onset_median_ms} ms`, `${pct(ev.mimic_intelligibility.onset_within_50ms)} 字在 50 ms 内 · 置信度 ${ev.mimic_intelligibility.realign_confidence}（原唱 ${ev.mimic_intelligibility.source_confidence}）`],
+    ev.mimic_intelligibility && ["模仿 · 咬字", `重对齐起点中位偏差 ${ev.mimic_intelligibility.onset_median_ms} ms`, `${pct(ev.mimic_intelligibility.onset_within_50ms)} 字在 50 ms 内 · 置信度 ${ev.mimic_intelligibility.realign_confidence ?? "—"}（原唱 ${ev.mimic_intelligibility.source_confidence ?? "—"}）`],
     ev.score_pitch && ["乐谱 · 音准", `${pct(ev.score_pitch.notes_on_pitch)} 音符在谱面音高`, `${ev.score_pitch.notes} 个音符`],
   ].filter(Boolean).map((r) => `<tr><td>${r[0]}</td><td>${r[1]}</td><td class="muted">${r[2]}</td></tr>`).join("");
   return `<div class="head" style="margin-top:14px"><h2>客观评估</h2><button class="ghost" id="evalBtn">${ev ? "重新评估" : "运行评估"}</button></div>

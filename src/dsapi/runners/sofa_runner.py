@@ -7,6 +7,7 @@ Usage: python sofa_runner.py <ckpt> <folder> <dictionary> <out.json> <accelerato
 import json
 import pathlib
 import sys
+from functools import lru_cache
 
 sys.path.insert(0, ".")
 
@@ -23,15 +24,25 @@ from train import LitForcedAlignmentTask  # noqa: E402
 modules.utils.load_wav.installed_torchaudio = False
 
 
+@lru_cache(maxsize=None)
+def load_models(ckpt: str, accelerator: str):
+    model = LitForcedAlignmentTask.load_from_checkpoint(ckpt, map_location="cpu")
+    model.set_inference_mode("force")
+    return model
+
+
 def main(ckpt: str, folder: str, dictionary: str, out_json: str, accelerator: str):
     g2p = modules.g2p.DictionaryG2P(dictionary=dictionary)
     g2p.set_in_format("lab")
     dataset = g2p.get_dataset(sorted(pathlib.Path(folder).glob("*.wav")))
 
-    model = LitForcedAlignmentTask.load_from_checkpoint(ckpt, map_location="cpu")
-    model.set_inference_mode("force")
+    model = load_models(ckpt, accelerator)
     trainer = pl.Trainer(logger=False, accelerator=accelerator, devices=1, enable_progress_bar=False)
-    predictions = trainer.predict(model, dataloaders=dataset, return_predictions=True)
+    try:
+        predictions = trainer.predict(model, dataloaders=dataset, return_predictions=True)
+    finally:
+        # Cache the network, not the previous request's trainer/dataset/results.
+        model.trainer = None
     predictions = modules.AP_detector.LoudnessSpectralcentroidAPDetector().process(predictions)
     predictions, errors = post_processing(predictions)
 

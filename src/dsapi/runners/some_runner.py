@@ -8,6 +8,7 @@ Usage: python some_runner.py <ckpt> <rmvpe.pt|-> <wav> <out.json> <out_f0.npy> <
 import json
 import pathlib
 import sys
+from functools import lru_cache
 
 sys.path.insert(0, ".")
 
@@ -22,13 +23,20 @@ from utils.binarizer_utils import get_pitch_parselmouth  # noqa: E402
 from utils.slicer2 import Slicer  # noqa: E402
 
 
-def main(ckpt: str, rmvpe_path: str, wav: str, out_json: str, out_f0: str, device: str):
+@lru_cache(maxsize=None)
+def load_models(ckpt: str, rmvpe_path: str, device: str):
     ckpt_path = pathlib.Path(ckpt)
     config = yaml.safe_load(ckpt_path.with_name("config.yaml").read_text(encoding="utf8"))
+    infer_ins = inference.MIDIExtractionInference(config=config, model_path=ckpt_path, device=device)
+    rmvpe = modules.rmvpe.RMVPE(rmvpe_path, device=device) if rmvpe_path != "-" else None
+    return config, infer_ins, rmvpe
+
+
+def main(ckpt: str, rmvpe_path: str, wav: str, out_json: str, out_f0: str, device: str):
+    config, infer_ins, rmvpe = load_models(ckpt, rmvpe_path, device)
     sr, hop = config["audio_sample_rate"], config["hop_size"]
     waveform, _ = librosa.load(wav, sr=sr, mono=True)
 
-    infer_ins = inference.MIDIExtractionInference(config=config, model_path=ckpt_path, device=device)
     slicer = Slicer(sr=sr, max_sil_kept=1000)
     chunks = slicer.slice(waveform)
     results = infer_ins.infer([c["waveform"] for c in chunks])
@@ -41,8 +49,7 @@ def main(ckpt: str, rmvpe_path: str, wav: str, out_json: str, out_f0: str, devic
             t += float(dur)
 
     length = (len(waveform) + hop - 1) // hop
-    if rmvpe_path != "-":
-        rmvpe = modules.rmvpe.RMVPE(rmvpe_path, device=device)
+    if rmvpe is not None:
         f0, uv = rmvpe.get_pitch(waveform, sample_rate=sr, hop_size=hop, length=length, interp_uv=True)
     else:
         f0, uv = get_pitch_parselmouth(waveform, sample_rate=sr, hop_size=hop, length=length, interp_uv=True)
