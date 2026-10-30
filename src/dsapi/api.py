@@ -11,6 +11,7 @@ GET  /tasks, /search?q=  helpers for the optional web UI (DSAPI_WEBUI=1, served 
 
 import json
 import os
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
@@ -103,6 +104,13 @@ def _state(task_id: str) -> dict:
 @app.get("/query_result", dependencies=[Depends(auth)])
 def query_result(task_id: str) -> dict:
     st = _state(task_id)
+    # Older saved jobs have no timestamps; the UI falls back to stage timings.
+    started = st.get("started_at")
+    end = st.get("finished_at")
+    st["elapsed_seconds"] = (
+        max(0.0, (end if end is not None else time.time()) - started)
+        if started is not None and (end is not None or st["status"] == "running") else None
+    )
     st["outputs"] = {k: f"/v1/audio?task_id={task_id}&kind={k}" for k in st["outputs"]}
     st["attribution"] = ATTRIBUTION
     ev = settings.WORK / task_id / "eval.json"

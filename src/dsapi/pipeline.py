@@ -37,6 +37,8 @@ class JobState:
     status: str = "queued"  # queued | running | done | failed
     stage: str = ""
     timings: dict[str, float] = field(default_factory=dict)
+    started_at: float | None = None
+    finished_at: float | None = None
     song: dict | None = None
     window: list[float] | None = None
     lines: list[dict] = field(default_factory=list)
@@ -86,12 +88,15 @@ class Job:
     def run(self) -> JobState:
         st = self.state
         st.status = "running"
+        st.started_at = time.time()
+        self.save()
         try:
             self._run()
             st.status, st.stage = "done", ""
         except Exception as e:  # noqa: BLE001 - surfaced to the API caller
             st.status, st.error = "failed", f"{type(e).__name__}: {e}"
             (self.dir / "error.txt").write_text(traceback.format_exc())
+        st.finished_at = time.time()
         self.save()
         return st
 
