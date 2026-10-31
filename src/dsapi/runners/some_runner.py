@@ -18,7 +18,7 @@ import torch  # noqa: E402
 import yaml  # noqa: E402
 
 import inference  # noqa: E402
-import modules.rmvpe  # noqa: E402
+from rmvpe_pitch import SegmentedRMVPE  # noqa: E402
 from utils.binarizer_utils import get_pitch_parselmouth  # noqa: E402
 from utils.slicer2 import Slicer  # noqa: E402
 
@@ -28,7 +28,7 @@ def load_models(ckpt: str, rmvpe_path: str, device: str):
     ckpt_path = pathlib.Path(ckpt)
     config = yaml.safe_load(ckpt_path.with_name("config.yaml").read_text(encoding="utf8"))
     infer_ins = inference.MIDIExtractionInference(config=config, model_path=ckpt_path, device=device)
-    rmvpe = modules.rmvpe.RMVPE(rmvpe_path, device=device) if rmvpe_path != "-" else None
+    rmvpe = SegmentedRMVPE(rmvpe_path, device=device) if rmvpe_path != "-" else None
     return config, infer_ins, rmvpe
 
 

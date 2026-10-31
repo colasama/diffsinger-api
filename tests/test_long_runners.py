@@ -32,6 +32,11 @@ def test_long_runners_bound_model_inputs_and_preserve_timeline(monkeypatch, tmp_
         monkeypatch.setitem(sys.modules,name,value)
     path=Path(__file__).resolve().parents[1]/'src/dsapi/runners'/f'{runner}.py'
     monkeypatch.setattr(sys, 'path', sys.path.copy())
+    monkeypatch.syspath_prepend(str(path.parent))
+    # Do not retain a helper subclass based on this test's stub vendor class.
+    helper = ModuleType('rmvpe_pitch')
+    helper.__dict__.update(runpy.run_path(str(path.with_name('rmvpe_pitch.py'))))
+    monkeypatch.setitem(sys.modules, 'rmvpe_pitch', helper)
     namespace=runpy.run_path(str(path))
     main=namespace['main']
     model=SimpleNamespace(get_pitch=pitch)

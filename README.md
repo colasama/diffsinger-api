@@ -259,7 +259,10 @@ boundary/presence thresholds of 0.2 and language conditioning. It runs after
 alignment, using vowel boundaries and phrase context from HubertFA (or an explicit
 SOFA override). GAME sessions stay cached in a worker, using CUDA when available or
 CPU otherwise; on this Mac the validated path uses 4 CPU threads. RMVPE runs in
-a separate worker and preserves the source F0 for mimic; without its checkpoint,
+a separate worker and decodes each voiced run with Viterbi (confidence threshold
+0.03). Runs shorter than 50 ms retain local decoding, and unvoiced gaps keep
+their original mask. This applies to both GAME and legacy SOME paths; F0
+interpolation and timing remain unchanged. Without the RMVPE checkpoint,
 F0 extraction falls back to Praat. The default path does not load SOME's note
 network. Set `DSAPI_NOTE_EXTRACTOR=some` and restart to use the previous extractor.
 `notes.json` and `job.json` record the chosen extractor; `/runtime` reports its
@@ -391,7 +394,6 @@ once to -16 LUFS / -1.5 dBTP before MP3 encoding. Long outputs use
 `score_mix_part_0000` / `mimic_mix_part_0000` etc., retaining the complete mix's
 normalization across parts. `job.json.mixing` records gain and frame adjustment.
 Separated accompaniment can retain some original vocal leakage.
-
 
 ### 自填简谱和歌词
 

@@ -7,13 +7,13 @@ sys.path.insert(0, ".")
 import librosa
 import numpy as np
 import torch
-from modules.rmvpe import RMVPE
+from rmvpe_pitch import SegmentedRMVPE
 from utils.binarizer_utils import get_pitch_parselmouth
 
 
 @lru_cache(maxsize=None)
 def load_models(checkpoint: str, device: str):
-    return RMVPE(checkpoint, device=device) if checkpoint != "-" else None
+    return SegmentedRMVPE(checkpoint, device=device) if checkpoint != "-" else None
 
 
 def main(checkpoint: str, wav: str, output: str, device: str):
