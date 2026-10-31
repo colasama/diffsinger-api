@@ -18,6 +18,9 @@ CONSONANT_GAP = 0.25  # gaps shorter than this between syllables are consonants,
 PHRASE_GAP = 0.3  # a silence/breath at least this long starts a new phrase
 MAX_PHRASE = 12.0  # seconds; longer runs are split at their widest internal gap
 HEAD = 0.4  # max SP context kept around a phrase when rendering
+HELD_MORA = 0.05  # a Japanese vowel mora aligned shorter than this was sung as its predecessor held
+# (previous vowel, mora) pairs commonly sung as one long vowel: ソウ = ソー, セイ = セー.
+_HELD_PAIRS = {("a", "a"), ("i", "i"), ("u", "u"), ("e", "e"), ("o", "o"), ("o", "u"), ("e", "i")}
 
 
 def sofa_words() -> set[str]:
@@ -261,6 +264,23 @@ def _split(spans: list[tuple[float, float]], languages: list[str] | None = None)
     return out
 
 
+def _held_morae(units: list[str], langs: list[str], line_of: list[int],
+                 spans: list[tuple[float, float]]) -> dict[int, int]:
+    """{held mora: syllable it prolongs} for Japanese vowels the aligner left no time.
+
+    The singer held the previous vowel instead, so the mora joins that note
+    rather than becoming a sliver note (and a phoneme that was never sung).
+    """
+    held: dict[int, int] = {}
+    for i in range(1, len(units)):
+        j = held.get(i - 1, i - 1)
+        prev = units[i - 1]
+        if (langs[i] == langs[j] == "ja" and line_of[i] == line_of[j] and "_" not in prev
+                and (prev[-1:], units[i]) in _HELD_PAIRS and spans[i][1] - spans[i][0] < HELD_MORA):
+            held[i] = j
+    return held
+
+
 def build_phrases(vb: Voicebank, segs: list[dict], sofa: dict, notes: list[dict], f0: np.ndarray
                   ) -> tuple[list[Phrase], list[dict]]:
     f0_midi = hz_to_midi(f0)
@@ -288,8 +308,23 @@ def build_phrases(vb: Voicebank, segs: list[dict], sofa: dict, notes: list[dict]
             word_phones.append(mapped)
             spans.append((next((s for p, s, _ in mapped if vb.is_vowel(p)), ws), we))
         word_spans = [(ws, we) for _, ws, we in words]
+        chars, line_of = list(seg["chars"]), list(seg["line_of"])
+        held = _held_morae(units, langs, line_of, word_spans)
+        merged = {}
+        for i, j in held.items():
+            name, start, _ = word_phones[j][-1]
+            word_phones[j] = word_phones[j][:-1] + [(name, start, word_spans[i][1])]
+            word_spans[j] = (word_spans[j][0], word_spans[i][1])
+            spans[j] = (spans[j][0], word_spans[i][1])
+            chars[j] += chars[i]
+            merged[j] = merged.get(j, 0) + 1
+        if held:
+            kept = [i for i in range(len(words)) if i not in held]
+            merged = {kept.index(j): n for j, n in merged.items()}
+            units, langs, chars, line_of, word_phones, spans, word_spans = (
+                [xs[i] for i in kept] for xs in (units, langs, chars, line_of, word_phones, spans, word_spans))
 
-        keep = [i for i, k in enumerate(seg["line_of"]) if k >= 0]
+        keep = [i for i, k in enumerate(line_of) if k >= 0]
         first, last = keep[0], keep[-1] + 1
         for a, b in _split(word_spans[first:last], langs[first:last]):
             a, b = a + first, b + first
@@ -322,19 +357,20 @@ def build_phrases(vb: Voicebank, segs: list[dict], sofa: dict, notes: list[dict]
                              if j + 1 < len(groups) else spans[i][1])
                         if j + 1 == len(groups) and i + 1 < b and 0 <= spans[i + 1][0] - e < CONSONANT_GAP:
                             e = spans[i + 1][0]
-                        syls.append(Syllable(seg["chars"][i] if j == 0 else "·",
+                        syls.append(Syllable(chars[i] if j == 0 else "·",
                                             f"{units[i]}~{j}",
                                             _syllable_notes(s, e, notes, f0_midi), "en"))
                     continue
                 s, e = spans[i]
                 if i + 1 < b and 0 <= spans[i + 1][0] - e < CONSONANT_GAP:
                     e = spans[i + 1][0]  # the next consonant still belongs to this note
-                syls.append(Syllable(seg["chars"][i], units[i], _syllable_notes(s, e, notes, f0_midi), langs[i]))
+                syls.append(Syllable(chars[i], units[i], _syllable_notes(s, e, notes, f0_midi), langs[i]))
             phrases.append(Phrase(syls, phones=phones, f0_midi=f0_midi[int(round(lo * fps)):]))
-            lines = sorted({seg["line_of"][i] for i in range(a, b)})
-            report.append({"line": (" " if langs[a] == "en" else "").join(seg["chars"][a:b]), "lrc_lines": [seg["texts"][k] for k in lines],
+            lines = sorted({line_of[i] for i in range(a, b)})
+            report.append({"line": (" " if langs[a] == "en" else "").join(chars[a:b]), "lrc_lines": [seg["texts"][k] for k in lines],
                            "lang": langs[a],
                            "start": round(word_spans[a][0], 2), "backend": seg.get("backend", "sofa"),
                            "confidence": round(res["confidence"], 3) if res.get("confidence") is not None else None,
-                           "syllables": len(syls), "notes": sum(len(x.notes) for x in syls)})
+                           "syllables": len(syls), "notes": sum(len(x.notes) for x in syls),
+                           "held_morae": sum(merged.get(i, 0) for i in range(a, b))})
     return phrases, report

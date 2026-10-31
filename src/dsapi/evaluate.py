@@ -4,8 +4,10 @@
 - mimic intelligibility: re-align the render with the task's original aligner
   and compare word onsets with the source alignment
 - score pitch: rendered f0 per note vs the saved synthesis score's midi
+- alignment: share of lyric units aligned shorter than 50 ms
 """
 
+import itertools
 import json
 import shutil
 from pathlib import Path
@@ -32,6 +34,12 @@ def evaluate(task_dir: Path) -> dict:
     aligned = json.loads((task_dir / "sofa.json").read_text())
     segments = (json.loads((task_dir / "segments.json").read_text())
                 if (task_dir / "segments.json").is_file() else [{"name": "clip", "offset": 0}])
+    # Lyric units the aligner squeezed to slivers; a regression signal without labels.
+    durations = [w[2] - w[1] for segment in segments if "words" in aligned.get(segment["name"], {})
+                 for w, line in zip([w for w in aligned[segment["name"]]["words"] if w[0] not in ("SP", "AP")],
+                                    segment.get("line_of") or itertools.repeat(0)) if line >= 0]
+    out["alignment"] = {"units": len(durations),
+                        "below_50ms": round(float(np.mean(np.array(durations) < 0.05)), 3) if durations else None}
 
     if (task_dir / "mimic.wav").is_file():
         src_f0, src_uv = np.load(task_dir / "f0.npy")

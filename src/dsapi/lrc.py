@@ -63,7 +63,7 @@ class Line:
             elif _HAN.search(chunk) or _KANA.search(chunk):
                 lang = "ja" if self.lang == "ja" or _KANA.search(chunk) else "zh"
                 han = _HAN.findall(chunk)
-                part = (japanese.morae(japanese.reading(chunk)) if lang == "ja"
+                part = (japanese.lyric_morae(chunk) if lang == "ja"
                         else list(zip(han, to_pinyin(han))))
             else:
                 continue

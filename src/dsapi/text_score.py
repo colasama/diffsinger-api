@@ -76,7 +76,7 @@ def _units(text: str, lang: str, bank, line: int) -> list[tuple[str, str]]:
             reading = japanese.reading(text, strict=True)
         except ValueError as exc:
             raise ScoreError(line, str(exc)) from exc
-        units = japanese.morae(reading)
+        units = japanese.lyric_morae(text, strict=True)
         if reading.startswith(("ッ", "ー")):
             raise ScoreError(line, "促音或长音不能独立放在开头")
         if "".join(display for display, _ in units) != reading:

@@ -63,8 +63,11 @@ def _tagger():
     return fugashi.Tagger()
 
 
-def reading(text: str, *, strict: bool = False) -> str:
-    """Katakana reading of a lyric line; non-Japanese characters are dropped."""
+def reading(text: str, *, strict: bool = False, spoken: bool = False) -> str:
+    """Katakana reading of a lyric line; non-Japanese characters are dropped.
+
+    spoken=True uses unidic's pronunciation (ソウ -> ソー) where it has one.
+    """
     out = []
     for w in _tagger()(text):
         surface = w.surface
@@ -72,6 +75,9 @@ def reading(text: str, *, strict: bool = False) -> str:
             out.append(_OVERRIDES[surface])
             continue
         kana = getattr(w.feature, "kana", None)
+        pron = getattr(w.feature, "pron", None) if spoken else None
+        if pron and pron != "*" and kana and kana != "*":
+            kana = pron
         if not kana or kana == "*":
             if strict and not has_kana(surface) and re.search(r"[\u3400-\u9fff々]", surface):
                 raise ValueError(f"无法识别 {surface} 的日语读音，请改填假名")
@@ -116,6 +122,20 @@ def morae(kata: str) -> list[tuple[str, str]]:
             units.append([c, _BASE[c]])
         i += 1
     return [(d, r) for d, r in units]
+
+
+def lyric_morae(text: str, *, strict: bool = False) -> list[tuple[str, str]]:
+    """Morae of a lyric line, displayed as written but sung as pronounced.
+
+    An orthographic ウ that unidic pronounces as a long vowel (ソウ = ソー,
+    トウキョウ = トーキョー) is sung as the held vowel, not a separate "u".
+    Other spellings (エイ, verb-final ウ as in オモウ) keep their written mora.
+    """
+    written = morae(reading(text, strict=strict))
+    spoken = morae(reading(text, spoken=True))
+    if len(spoken) != len(written):
+        return written
+    return [(d, s if d == "ウ" and sd == "ー" else r) for (d, r), (sd, s) in zip(written, spoken)]
 
 
 def unit_phonemes(unit: str, dictionary: dict[str, list[str]]) -> list[str] | None:
