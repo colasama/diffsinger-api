@@ -106,3 +106,55 @@ def protect_lead(original: Path, separated: Path, out_dir: Path) -> Path:
     report.update(original=str(original), separated=str(separated), output=str(result))
     (out_dir / "lead_protection.json").write_text(json.dumps(report, indent=2))
     return result
+
+
+def separate_long_vocals(src: Path, out_dir: Path, chunk_seconds: int = 40) -> tuple[Path, Path]:
+    """Bound separator activations; stitch overlapping stems on the sample grid."""
+    info = sf.info(src)
+    if info.duration <= 60:
+        return separate_vocals(src, out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sr, count = settings.SAMPLE_RATE, info.frames
+    step, overlap = chunk_seconds * sr, 2 * sr
+    # Accumulators are disk-backed; only a chunk of audio is resident at once.
+    accum = np.memmap(out_dir / "stems.tmp", mode="w+", dtype="float32", shape=(count, 3))
+    weights = np.memmap(out_dir / "weights.tmp", mode="w+", dtype="float32", shape=(count,))
+    accum[:] = 0
+    weights[:] = 0
+    try:
+        with sf.SoundFile(src) as source:
+            for index, core in enumerate(range(0, count, step)):
+                a, b = max(0, core - overlap), min(count, core + step + overlap)
+                folder = out_dir / f"chunk_{index:04}"
+                folder.mkdir(exist_ok=True)
+                source.seek(a)
+                chunk = folder / "input.wav"
+                sf.write(chunk, source.read(b - a, dtype="float32", always_2d=True), sr, subtype="FLOAT")
+                lead, inst = separate_vocals(chunk, folder / "sep")
+                vocal = load(lead)
+                instrumental, rate = sf.read(inst, dtype="float32", always_2d=True)
+                if rate != sr or min(len(vocal), len(instrumental)) < b - a:
+                    raise ValueError("Separator truncated a long-audio chunk")
+                instrumental = np.repeat(instrumental, 2, axis=1) if instrumental.shape[1] == 1 else instrumental[:, :2]
+                w = np.ones(b - a, np.float32)
+                if a > 0:
+                    ramp = min(2*overlap, len(w))
+                    w[:ramp] = np.linspace(0, 1, ramp)
+                if b < count:
+                    ramp = min(2*overlap, len(w))
+                    w[-ramp:] = np.linspace(1, 0, ramp)
+                accum[a:b, 0] += vocal[:b-a] * w
+                accum[a:b, 1:] += instrumental[:b-a] * w[:, None]
+                weights[a:b] += w
+        lead, inst = out_dir / "lead.wav", out_dir / "instrumental.wav"
+        with sf.SoundFile(lead, "w", sr, 1, subtype="FLOAT") as lv, sf.SoundFile(inst, "w", sr, 2, subtype="FLOAT") as iv:
+            for a in range(0, count, step):
+                b = min(count, a + step)
+                part = accum[a:b] / np.maximum(weights[a:b, None], 1e-6)
+                lv.write(part[:, 0])
+                iv.write(part[:, 1:])
+        return lead, inst
+    finally:
+        del accum, weights
+        (out_dir / "stems.tmp").unlink(missing_ok=True)
+        (out_dir / "weights.tmp").unlink(missing_ok=True)

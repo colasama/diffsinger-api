@@ -83,3 +83,29 @@ def test_pipeline_uses_protected_lead_and_keeps_raw_stems(monkeypatch, tmp_path,
             assert not (out / 'lead_protected.wav').exists()
     else:
         assert not (out / 'lead_protection.json').exists()
+
+
+def test_long_separation_overlap_preserves_entire_timeline(tmp_path, monkeypatch):
+    # Includes a final chunk shorter than the overlap ramp.
+    rate = 100
+    monkeypatch.setattr(audio.settings, 'SAMPLE_RATE', rate)
+    source = tmp_path/'long.wav'
+    waveform = np.sin(np.arange(8050)*.01).astype(np.float32)*.1
+    sf.write(source, waveform, rate, subtype='FLOAT')
+    calls = []
+    def separate(src, folder):
+        samples, sr = sf.read(src, dtype='float32')
+        calls.append(len(samples))
+        folder.mkdir(parents=True)
+        lead, inst = folder/'lead.wav', folder/'inst.wav'
+        sf.write(lead, samples, sr, subtype='FLOAT')
+        sf.write(inst, np.column_stack([samples*.5, samples*.25]), sr, subtype='FLOAT')
+        return lead, inst
+    monkeypatch.setattr(audio, 'separate_vocals', separate)
+    lead, inst = audio.separate_long_vocals(source, tmp_path/'sep')
+    rendered, _ = sf.read(lead)
+    instrumental, _ = sf.read(inst)
+    assert len(calls) == 3 and max(calls) <= 4400
+    np.testing.assert_allclose(rendered, waveform, atol=1e-7)
+    np.testing.assert_allclose(instrumental[:,0], waveform*.5, atol=1e-7)
+    assert not list((tmp_path/'sep').glob('*.tmp'))

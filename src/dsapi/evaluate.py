@@ -29,8 +29,9 @@ def _cents(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
 def evaluate(task_dir: Path) -> dict:
     out: dict = {}
-    sofa = json.loads((task_dir / "sofa.json").read_text())["clip"]
-    seg = (task_dir / "segments" / "clip.lab").read_text().split()
+    aligned = json.loads((task_dir / "sofa.json").read_text())
+    segments = (json.loads((task_dir / "segments.json").read_text())
+                if (task_dir / "segments.json").is_file() else [{"name": "clip", "offset": 0}])
 
     if (task_dir / "mimic.wav").is_file():
         src_f0, src_uv = np.load(task_dir / "f0.npy")
@@ -44,24 +45,45 @@ def evaluate(task_dir: Path) -> dict:
         realign = task_dir / "eval_align"
         shutil.rmtree(realign, ignore_errors=True)
         realign.mkdir()
-        shutil.copy(task_dir / "mimic.wav", realign / "clip.wav")
-        (realign / "clip.lab").write_text(" ".join(seg), encoding="utf8")
+        waveform = audio.load(task_dir / "mimic.wav")
+        for segment in segments:
+            name, offset = segment["name"], segment["offset"]
+            if len(segments) == 1 and offset == 0:
+                shutil.copy(task_dir / "mimic.wav", realign / f"{name}.wav")
+            else:
+                start = round(offset * settings.SAMPLE_RATE)
+                stop = start + round(aligned[name]["length"] * settings.SAMPLE_RATE)
+                audio.save(realign / f"{name}.wav", waveform[start:stop])
+            shutil.copy(task_dir / "segments" / f"{name}.lab", realign / f"{name}.lab")
         meta = json.loads((task_dir / "align_meta.json").read_text()) if (task_dir / "align_meta.json").is_file() else {}
-        res = tools.align(realign, realign, Path(meta.get("ckpt", settings.SOFA_CKPT)),
-                          Path(meta.get("dictionary", settings.SOFA_DICT)),
-                          backend=meta.get("backend", "sofa"), lang=meta.get("lang", "zh"))["clip"]
-        src_words = [w for w in sofa["words"] if w[0] not in ("SP", "AP")]
-        out_words = [w for w in res["words"] if w[0] not in ("SP", "AP")]
-        # Only words that were actually rendered (context lines are silent in the render).
-        rendered = [i for i, w in enumerate(src_words)
-                    if np.any(np.abs(audio.load(task_dir / "mimic.wav")[int(w[1] * settings.SAMPLE_RATE):
-                                                                       int(w[2] * settings.SAMPLE_RATE)]) > 1e-3)]
-        diffs = np.array([abs(out_words[i][1] - src_words[i][1]) for i in rendered]) * 1000
-        out["mimic_intelligibility"] = {"realign_confidence": round(res["confidence"], 3) if res.get("confidence") is not None else None,
-                                        "source_confidence": round(sofa["confidence"], 3) if sofa.get("confidence") is not None else None,
-                                        "onset_median_ms": round(float(np.median(diffs)), 1),
-                                        "onset_within_50ms": round(float(np.mean(diffs < 50)), 3),
-                                        "words": len(rendered)}
+        results = tools.align(realign, realign, Path(meta.get("ckpt", settings.SOFA_CKPT)),
+                              Path(meta.get("dictionary", settings.SOFA_DICT)),
+                              backend=meta.get("backend", "sofa"), lang=meta.get("lang", "zh"))
+        differences, source_confidence, render_confidence = [], [], []
+        for segment in segments:
+            name, offset = segment["name"], segment["offset"]
+            sofa, res = aligned[name], results[name]
+            src_words = [w for w in sofa["words"] if w[0] not in ("SP", "AP")]
+            out_words = [w for w in res["words"] if w[0] not in ("SP", "AP")]
+            if [w[0] for w in src_words] != [w[0] for w in out_words]:
+                raise ValueError("Evaluation word sequence mismatch")
+            for i, word in enumerate(src_words):
+                if segment.get("line_of", [0]*len(src_words))[i] < 0:
+                    continue
+                start, stop = (round((t+offset)*settings.SAMPLE_RATE) for t in word[1:])
+                if np.any(np.abs(waveform[start:stop]) > 1e-3):
+                    differences.append(abs(out_words[i][1]-word[1])*1000)
+            if sofa.get("confidence") is not None:
+                source_confidence.append(sofa["confidence"])
+            if res.get("confidence") is not None:
+                render_confidence.append(res["confidence"])
+        diffs = np.array(differences)
+        out["mimic_intelligibility"] = {
+            "realign_confidence": round(float(np.mean(render_confidence)), 3) if render_confidence else None,
+            "source_confidence": round(float(np.mean(source_confidence)), 3) if source_confidence else None,
+            "onset_median_ms": round(float(np.median(diffs)), 1) if len(diffs) else None,
+            "onset_within_50ms": round(float(np.mean(diffs < 50)), 3) if len(diffs) else None,
+            "words": len(diffs)}
 
     if (task_dir / "score.wav").is_file():
         score = json.loads((task_dir / "score.json").read_text())

@@ -163,3 +163,36 @@ def test_evaluation_reuses_original_engine_and_accepts_missing_confidence(tmp_pa
     assert out['source_confidence']==confidence
     assert out['realign_confidence']==confidence
     assert out['onset_median_ms']==0
+
+
+def test_long_alignment_chunks_keep_all_lines_and_offsets(tmp_path, monkeypatch):
+    dictionary = tmp_path/'hfa.txt'
+    dictionary.write_text('ge\tg e\n')
+    monkeypatch.setattr(settings, 'ALIGNER', 'hubertfa')
+    monkeypatch.setattr(settings, 'HUBERTFA_DICT', dictionary)
+    lines = [lrc.Line(float(i), float(i+4), '歌') for i in range(0, 100, 10)]
+    segs = extract.write_segments(lines, np.zeros(100*44100, np.float32), tmp_path/'segments', Voicebank())
+    assert len(segs) == 3
+    assert [s['offset'] for s in segs] == [0, 38, 78]
+    assert sum(sum(k>=0 for k in s['line_of']) for s in segs) == 10
+    assert all((tmp_path/'segments'/f"{s['name']}.wav").is_file() for s in segs)
+    assert len({s['dictionary'] for s in segs}) == 1
+
+
+def test_evaluate_chunked_alignment_preserves_offsets_and_ignores_context(tmp_path, monkeypatch):
+    from dsapi import evaluate
+    (tmp_path/'segments').mkdir()
+    segments=[{'name':'a','offset':0,'line_of':[0]}, {'name':'b','offset':1,'line_of':[-1,0]}]
+    aligned={'a':{'length':1,'words':[['ge',0,.8]]},
+             'b':{'length':1,'words':[['ge',0,.2],['ge',.3,.8]]}}
+    (tmp_path/'segments.json').write_text(json.dumps(segments))
+    (tmp_path/'sofa.json').write_text(json.dumps(aligned))
+    for seg in segments:
+        (tmp_path/'segments'/f"{seg['name']}.lab").write_text('ge')
+    (tmp_path/'mimic.wav').touch()
+    np.save(tmp_path/'f0.npy',np.array([[261.6]*20,[0]*20]))
+    monkeypatch.setattr(evaluate,'_f0',lambda _: (np.full(20,261.6),np.ones(20,dtype=bool)))
+    monkeypatch.setattr(evaluate.audio,'load',lambda _: np.ones(88200))
+    monkeypatch.setattr(evaluate.tools,'align',lambda *args,**kwargs: aligned)
+    out=evaluate.evaluate(tmp_path)['mimic_intelligibility']
+    assert out['words']==2 and out['onset_median_ms']==0

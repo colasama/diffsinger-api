@@ -129,7 +129,7 @@ def _seconds(stamp: str) -> float | None:
     return hours * 3600 + minutes * 60 + seconds if seconds < 60 else None
 
 
-def parse(text: str, song_end: float) -> list[Line]:
+def parse(text: str, song_end: float, *, trim_gaps: bool = True) -> list[Line]:
     text = _TAG.sub(_normalize_tag, text.replace("\ufeff", ""))
     offsets = _OFFSET.findall(text)
     # LRC player correction in milliseconds: positive displays lyrics earlier.
@@ -174,7 +174,8 @@ def parse(text: str, song_end: float) -> list[Line]:
     for ln in lines:
         ln.lang = ("ja" if _KANA.search(ln.text) else context_lang if _HAN.search(ln.text) else "en")
         sung_length = sum({"ja": .45, "en": 1.2, "zh": .6}[lang] for _, _, lang in ln.routed_units)
-        ln.end = min(ln.end, ln.start + max(2.0, sung_length + 1.5))
+        if trim_gaps:
+            ln.end = min(ln.end, ln.start + max(2.0, sung_length + 1.5))
         if ln.chars and ln.end > ln.start and ln.start not in seen:
             chosen.append(ln)
             seen.add(ln.start)

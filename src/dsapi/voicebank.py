@@ -6,7 +6,8 @@ the models are integer frame counts that sum to the phrase length.
 
 import json
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cached_property, lru_cache
+import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +19,7 @@ from .onnx_backend import OnnxSession, create_session
 LANGS = ("zh", "ja", "en")
 
 
+@lru_cache(maxsize=16)
 def _session(path: Path) -> OnnxSession:
     return create_session(path)
 
@@ -31,10 +33,11 @@ class _Model:
         self.phonemes: dict[str, int] = json.loads((root / self.cfg["phonemes"]).read_text())
         self.languages: dict[str, int] = json.loads((root / self.cfg["languages"]).read_text())
         self._sessions: dict[str, OnnxSession] = {}
+        self._session_paths: dict[str, Path] = {}
 
     def session(self, key: str) -> OnnxSession:
         if key not in self._sessions:
-            self._sessions[key] = _session(self.root / self.cfg[key])
+            self._sessions[key] = _session(self._session_paths.get(key, self.root / self.cfg[key]))
         return self._sessions[key]
 
     def encode(self, phones: list[str]) -> tuple[np.ndarray, np.ndarray]:
@@ -65,15 +68,79 @@ class Notes:
     dur: np.ndarray  # int frames
 
 
+@lru_cache(maxsize=2)
+def _models(root: Path):
+    models = [_Model(root / sub) for sub in ("", "dsdur", "dspitch", "dsvariance")]
+    # This export duplicates the pitch/variance package. Share only verified files.
+    a, b = models[2:]
+    if a.cfg == b.cfg and all(
+        hashlib.sha256((a.root / a.cfg[key]).read_bytes()).digest()
+        == hashlib.sha256((b.root / b.cfg[key]).read_bytes()).digest()
+        for key in ("linguistic", "pitch", "variance") if key in a.cfg
+    ):
+        for key in ("linguistic", "pitch", "variance"):
+            if key in a.cfg:
+                b._session_paths[key] = a.root / a.cfg[key]
+    return models
+
+
 class Voicebank:
-    def __init__(self, root: Path = settings.VOICEBANK, vocoder: Path = settings.VOCODER):
-        self.acoustic = _Model(root)
-        self.dur = _Model(root / "dsdur")
-        self.pitch = _Model(root / "dspitch")
-        self.variance = _Model(root / "dsvariance")
+    def __init__(self, root: Path = settings.VOICEBANK, vocoder: Path = settings.VOCODER,
+                 *, speaker: str | None = None, seed: int | None = None):
+        self.acoustic, self.dur, self.pitch, self.variance = _models(root.resolve())
+        self.speaker = speaker
+        self.rng = np.random.default_rng(seed)
+        self._embeddings = {}
         voc_cfg = yaml.safe_load((vocoder / "vocoder.yaml").read_text())
         self._vocoder_path = vocoder / voc_cfg["model"]
         self._vocoder: OnnxSession | None = None
+
+    def _run(self, model: _Model, key: str, feed: dict, n: int | None = None):
+        """Adapt fixed-speaker and Retake exports using their actual signatures.
+
+        Zero blend keeps the primary encoder; all-true retake generates all
+        frames. Auxiliary tokens/encoders duplicate the primary input, so even
+        the unused mixing branch is valid. Noise is explicit in Retake exports.
+        """
+        session = model.session(key)
+        inputs = {i.name: i for i in session.get_inputs()}
+        if "spk_embed" in inputs:
+            if model.root not in self._embeddings:
+                names = [s for s in model.cfg.get("speakers", [])
+                         if s.rsplit(".", 1)[-1] == self.speaker]
+                if len(names) != 1:
+                    raise ValueError(f"No unique embedding for {self.speaker}")
+                emb = np.fromfile(model.root / (names[0] + ".emb"), dtype="<f4")
+                if emb.shape != (model.cfg["hidden_size"],) or not np.isfinite(emb).all():
+                    raise ValueError("Invalid speaker embedding")
+                self._embeddings[model.root] = emb
+            length = feed["encoder_out"].shape[1] if key == "dur" else n
+            feed["spk_embed"] = np.broadcast_to(self._embeddings[model.root], (1, length, model.cfg["hidden_size"])).copy()
+        if "tokens_b" in inputs:
+            feed["tokens_b"] = feed["tokens"].copy()
+        if "encoder_out_b" in inputs:
+            feed["encoder_out_b"] = feed["encoder_out"].copy()
+        if "blend" in inputs:
+            length = feed["tokens"].shape[1] if key == "linguistic" else n
+            feed["blend"] = np.zeros((1, length), np.float32)
+        for name in ("tension", "mouth_opening", "shift_mouth_opening"):
+            if name in inputs and name not in feed:
+                feed[name] = np.zeros((1, n), np.float32)
+        if key == "variance":
+            channels = len(session.get_outputs())
+            feed["retake"] = np.ones((1, n, channels), bool)
+        if "gt_mel" in inputs:
+            feed["gt_mel"] = np.zeros((1, n, self.acoustic.cfg["num_mel_bins"]), np.float32)
+            feed["retake"] = np.ones((1, n), bool)
+        if "noise" in inputs:
+            shape = [n if d == "n_frames" else d for d in inputs["noise"].shape]
+            if not all(isinstance(d, int) and d > 0 for d in shape):
+                raise ValueError(f"Unsupported noise shape: {shape}")
+            feed["noise"] = self.rng.standard_normal(shape).astype(np.float32)
+        missing = inputs.keys() - feed.keys()
+        if missing:
+            raise ValueError(f"Unsupported {key} inputs: {sorted(missing)}")
+        return session.run(None, {k: v for k, v in feed.items() if k in inputs})
 
     @cached_property
     def dictionaries(self) -> dict[str, dict[str, list[str]]]:
@@ -122,6 +189,20 @@ class Voicebank:
                         entries[grapheme] = []
                 elif line.startswith("- ") and grapheme is not None:
                     entries[grapheme].append(line[2:].strip())
+        if lang == "en" and not entries:
+            # New exports ship symbols/replacements only and expect an external
+            # CMU lexicon. Use the installed aligner's dictionary, validating all
+            # synthesis stages; _r and #r denote the same syllabic-r phone.
+            lexicon = settings.HUBERTFA_MODEL.parent / "ds_cmudict-07b.txt"
+            known = set.intersection(*(set(m.phonemes) for m in (self.acoustic, self.dur, self.pitch, self.variance)))
+            for raw in lexicon.read_text(encoding="utf-8-sig").splitlines():
+                fields = raw.split()
+                if not fields:
+                    continue
+                word, *phones = fields
+                phones = ["en/" + ("#r" if p == "_r" and "en/#r" in known else p) for p in phones]
+                if phones and all(p in known for p in phones):
+                    entries.setdefault(word.lower(), phones)
         cache[lang] = (entries, vowels)
         return cache[lang]
 
@@ -165,10 +246,10 @@ class Voicebank:
     def predict_durations(self, phones: list[str], word_div: np.ndarray, word_dur: np.ndarray,
                           ph_midi: np.ndarray) -> np.ndarray:
         tokens, langs = self.dur.encode(phones)
-        enc, mask = self.dur.session("linguistic").run(None, {
+        enc, mask = self._run(self.dur, "linguistic", {
             "tokens": tokens, "languages": langs,
             "word_div": word_div[None].astype(np.int64), "word_dur": word_dur[None].astype(np.int64)})
-        pred = self.dur.session("dur").run(None, {
+        pred = self._run(self.dur, "dur", {
             "encoder_out": enc, "x_masks": mask, "ph_midi": ph_midi[None].astype(np.int64)})[0][0]
         # Rescale inside each word so phonemes exactly fill the word's frames.
         out = np.zeros(len(phones), dtype=np.int64)
@@ -182,43 +263,44 @@ class Voicebank:
 
     def predict_pitch(self, phones: list[str], ph_dur: np.ndarray, notes: Notes, steps: int = 10) -> np.ndarray:
         tokens, langs = self.pitch.encode(phones)
-        enc, _ = self.pitch.session("linguistic").run(None, {
+        enc, _ = self._run(self.pitch, "linguistic", {
             "tokens": tokens, "languages": langs, "ph_dur": ph_dur[None].astype(np.int64)})
         n_frames = int(ph_dur.sum())
         base = np.repeat(notes.midi, notes.dur).astype(np.float32)[:n_frames]
-        return self.pitch.session("pitch").run(None, {
+        return self._run(self.pitch, "pitch", {
             "encoder_out": enc, "ph_dur": ph_dur[None].astype(np.int64),
             "note_midi": notes.midi[None].astype(np.float32), "note_rest": notes.rest[None],
             "note_dur": notes.dur[None].astype(np.int64), "pitch": base[None],
             "expr": np.ones((1, n_frames), np.float32), "retake": np.ones((1, n_frames), bool),
-            "steps": np.array(steps, np.int64)})[0][0]
+            "steps": np.array(steps, np.int64)}, n_frames)[0][0]
 
     def predict_variance(self, phones: list[str], ph_dur: np.ndarray, pitch_midi: np.ndarray,
-                         steps: int = 20) -> tuple[np.ndarray, np.ndarray]:
+                         steps: int = 20) -> dict[str, np.ndarray]:
         tokens, langs = self.variance.encode(phones)
-        enc, _ = self.variance.session("linguistic").run(None, {
+        enc, _ = self._run(self.variance, "linguistic", {
             "tokens": tokens, "languages": langs, "ph_dur": ph_dur[None].astype(np.int64)})
         n = len(pitch_midi)
-        breath, voicing = self.variance.session("variance").run(None, {
+        outputs = self._run(self.variance, "variance", {
             "encoder_out": enc, "ph_dur": ph_dur[None].astype(np.int64), "pitch": pitch_midi[None].astype(np.float32),
             "breathiness": np.zeros((1, n), np.float32), "voicing": np.zeros((1, n), np.float32),
-            "retake": np.ones((1, n, 2), bool), "steps": np.array(steps, np.int64)})
-        return breath[0], voicing[0]
+            "retake": np.ones((1, n, 2), bool), "steps": np.array(steps, np.int64)}, n)
+        return {meta.name.removesuffix("_pred"): value for meta, value in
+                zip(self.variance.session("variance").get_outputs(), outputs)}
 
     def render(self, phones: list[str], ph_dur: np.ndarray, pitch_midi: np.ndarray,
                steps: int = 20, gender: float = 0.0) -> np.ndarray:
         """Acoustic + vocoder for one phrase; pitch_midi has one value per frame."""
         n = int(ph_dur.sum())
         pitch_midi = np.asarray(pitch_midi, np.float32)[:n]
-        breath, voicing = self.predict_variance(phones, ph_dur, pitch_midi)
+        variance = self.predict_variance(phones, ph_dur, pitch_midi)
         tokens, langs = self.acoustic.encode(phones)
         f0 = midi_to_hz(pitch_midi)
-        mel = self.acoustic.session("acoustic").run(None, {
+        mel = self._run(self.acoustic, "acoustic", {
             "tokens": tokens, "languages": langs, "durations": ph_dur[None].astype(np.int64),
-            "f0": f0[None], "breathiness": breath[None], "voicing": voicing[None],
+            "f0": f0[None], **variance,
             "gender": np.full((1, n), gender, np.float32), "velocity": np.ones((1, n), np.float32),
             "depth": np.array(self.acoustic.cfg.get("max_depth", 1.0), np.float32),
-            "steps": np.array(steps, np.int64)})[0]
+            "steps": np.array(steps, np.int64)}, n)[0]
         if self._vocoder is None:
             self._vocoder = _session(self._vocoder_path)
         return self._vocoder.run(None, {"mel": mel, "f0": f0[None]})[0][0]

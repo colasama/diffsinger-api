@@ -38,8 +38,14 @@ def main(ckpt: str, rmvpe_path: str, wav: str, out_json: str, out_f0: str, devic
     waveform, _ = librosa.load(wav, sr=sr, mono=True)
 
     slicer = Slicer(sr=sr, max_sil_kept=1000)
-    chunks = slicer.slice(waveform)
-    results = infer_ins.infer([c["waveform"] for c in chunks])
+    chunks = []
+    for original in slicer.slice(waveform):
+        samples = original["waveform"]
+        for start in range(0, len(samples), sr * 40):
+            chunks.append({"waveform": samples[start:start + sr * 40],
+                           "offset": float(original["offset"]) + start / sr})
+    # Avoid retaining activations for an entire long excerpt in one batch.
+    results = (infer_ins.infer([c["waveform"]])[0] for c in chunks)
 
     notes = []
     for chunk, res in zip(chunks, results):
@@ -49,10 +55,16 @@ def main(ckpt: str, rmvpe_path: str, wav: str, out_json: str, out_f0: str, devic
             t += float(dur)
 
     length = (len(waveform) + hop - 1) // hop
-    if rmvpe is not None:
-        f0, uv = rmvpe.get_pitch(waveform, sample_rate=sr, hop_size=hop, length=length, interp_uv=True)
-    else:
-        f0, uv = get_pitch_parselmouth(waveform, sample_rate=sr, hop_size=hop, length=length, interp_uv=True)
+    f0, uv = np.zeros(length, np.float32), np.ones(length, bool)
+    step, context = max(1, round(sr * 40 / hop)), max(1, round(sr * 2 / hop))
+    for start in range(0, length, step):
+        stop = min(length, start + step)
+        lo, hi = max(0, start - context), min(length, stop + context)
+        samples = waveform[lo * hop:min(len(waveform), hi * hop)]
+        kwargs = dict(sample_rate=sr, hop_size=hop, length=hi-lo, interp_uv=True)
+        cf, cu = (rmvpe.get_pitch(samples, **kwargs) if rmvpe is not None
+                  else get_pitch_parselmouth(samples, **kwargs))
+        f0[start:stop], uv[start:stop] = cf[start-lo:stop-lo], cu[start-lo:stop-lo]
     np.save(out_f0, np.stack([f0.astype(np.float32), uv.astype(np.float32)]))
 
     pathlib.Path(out_json).write_text(json.dumps({"sample_rate": sr, "hop_size": hop, "notes": notes}))

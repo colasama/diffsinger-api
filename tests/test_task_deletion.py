@@ -7,7 +7,7 @@ from dsapi import api, pipeline
 
 
 @pytest.fixture
-def client(monkeypatch, tmp_path):
+def client(monkeypatch, tmp_path, voice_files):
     monkeypatch.setattr(api.settings, "WORK", tmp_path / "work")
     monkeypatch.setattr(api, "API_KEY", "test-key")
     monkeypatch.setattr(api, "_jobs", {})

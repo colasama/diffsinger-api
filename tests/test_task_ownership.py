@@ -10,7 +10,7 @@ from dsapi import api, pipeline
 
 
 @pytest.fixture
-def client(monkeypatch, tmp_path):
+def client(monkeypatch, tmp_path, voice_files):
     monkeypatch.setattr(api.settings, "WORK", tmp_path)
     monkeypatch.setattr(api, "API_KEY", "legacy-secret")
     monkeypatch.setattr(api, "API_KEYS", {"alice": "alice-secret", "bob": "bob-secret"})

@@ -2,7 +2,7 @@
 
 Re-sing a lyric-selected excerpt with a DiffSinger voicebank: fetch the song,
 randomly pick a continuous LRC window, isolate the lead vocal, align lyrics, transcribe notes,
-then render with ImportedFixed (用户固定音源). No LLM anywhere in the pipeline.
+then render with a selectable voice (default: Imported Voice E / 用户音源戊). No LLM anywhere in the pipeline.
 
 ```
 Song id ─▶ audio + LRC ─▶ lyric window + language tags ─▶ crop ─▶ BS-RoFormer + karaoke
@@ -17,6 +17,72 @@ Song id ─▶ audio + LRC ─▶ lyric window + language tags ─▶ crop ─�
 ```sh
 uv sync
 scripts/fetch_models.sh   # includes HubertFA v0.0.7 and GAME Medium v1.0.3
+```
+
+## Voices and complete lyric excerpts
+
+Install the supplied `version1_MULTI_VOICE` package under `models/multi_voice/version1/`
+(or set `DSAPI_MULTI_VOICE` to its directory). Keep its acoustic, `dsdur`, `dspitch`,
+`dsvariance`, dictionaries and embeddings together. The existing
+`compatible_vocoder` vocoder is shared. Model weights are
+local artifacts and are not committed to Git. The new English export contains
+phoneme definitions only; its word pronunciations use the installed HubertFA
+`ds_cmudict-07b.txt`, with phonemes checked against all synthesis stages.
+
+`GET /voices` (same authentication as jobs) lists IDs, names, aliases, availability,
+languages and modes. New jobs default to `imported-voice-e`; missing default
+weights return 503, never silently switch voices. ImportedFixed remains `imported-fixed`.
+`voice_id` is accepted by `/release_task`, `/release_task_upload`, `/render_score`
+and CLI `--voice`. Task records snapshot the selected name/model/speaker;
+legacy records without voice metadata retain ImportedFixed attribution.
+
+| Voice ID | Name | Aliases used by Gokohime |
+| --- | --- | --- |
+| `imported-fixed` | 用户固定音源 | imported-fixed |
+| `imported-voice-a` | 用户音源甲 | imported-voice-a |
+| `imported-voice-b` | 用户音源乙 | imported-voice-b |
+| `imported-voice-c` | 用户音源丙 | imported-voice-c |
+| `imported-voice-d` | 用户音源丁 | imported-voice-d |
+| `imported-voice-e` | 用户音源戊 | imported-voice-e |
+| `imported-voice-f` | 用户音源己 | imported-voice-f |
+| `imported-voice-g` | 用户音源庚 | imported-voice-g |
+
+`lyric_extent=auto` (default) preserves short-window selection for one or two
+lyric lines. Three or more complete matched LRC lines, or three verified supplied
+sentences, select the entire requested continuous span. Newlines and sentence-end
+punctuation can delimit supplied sentences; Latin word spaces do not. Full
+selection bypasses the 25-second preference, 32/40-second limits, four-line
+matching limit and five-second gap restriction. It neither pads with extra lyric
+lines nor truncates a long request. Partial first/last lines include those full
+LRC lines. Explicit ranges use LRC timestamp ends, not estimated syllable lengths.
+Timing accuracy still depends on the source LRC matching the recording.
+
+`lyric_extent=window` keeps the previous short-window behavior; `exact` requires
+full lyric matching even for one line. Manual `start/end` wins. Explicit multiline
+lyrics that cannot be completely matched fail instead of selecting an unrelated
+random excerpt. Text fields accept up to 16,384 characters. Use
+`POST /resolve_song` with `{"q":"first line\nsecond line\nthird line","lyric_extent":"auto"}`
+for long text; the GET route remains available. Candidate searches use excerpts,
+but validate every supplied lyric token against the candidate's continuous LRC.
+
+Long audio is separated in overlapping chunks, alignment is grouped at lyric
+boundaries, F0 extraction is chunked, and synthesis proceeds phrase by phrase.
+Workers default to a duration-scaled timeout (at least 600 seconds);
+`DSAPI_WORKER_TIMEOUT` overrides it. Full MP3s are retained. If a rendered file
+exceeds 28 MiB, additional `<mode>_part_0000` outputs provide bounded downloads,
+with cuts at phrase ends where possible. API clients use the normal authenticated
+`/v1/audio` route for these kinds.
+
+Retake models share sessions across speakers and use per-request stage-specific
+embeddings and noise. `synthesis_seed` / `--synthesis-seed` controls that noise and
+is saved separately from the lyric-window `seed`. CPU, CUDA and WebGPU use the
+same adapter; the actual backend is reported by `/runtime`.
+
+Local smoke test (8 voices × score/mimic; writes `work/voice-smoke/`):
+
+```sh
+DSAPI_ONNX_BACKEND=cpu uv run python scripts/smoke_voices.py
+uv run dsapi run 3414700455 --voice imported-voice-e --lyric-query '歌词内容'
 ```
 
 ## Run
@@ -40,8 +106,7 @@ first four lines. Instrumental labels are excluded, duplicate timestamps are
 collapsed, and lyrics outside the audio duration are ignored. Selection uses
 lyrics only: incorrect LRC timing or a mismatched audio version can still select
 the wrong passage. Use `--start` and `--end` to select a lyric range manually.
-Supply both times or neither. Whole lyric lines are retained within the 40-second
-audio limit; the crop adds up to 1.5 seconds before and 1 second after them.
+Supply both times or neither. Explicit ranges bypass the 32/40-second limits. Whole lyric lines are retained; the crop adds up to 1.5 seconds before and 1 second after them.
 `job.json` saves the generated random seed, exact lyric/audio windows, selected
 lines and their languages. Reuse the seed with the same lyrics to reproduce the
 selection. Explicit start/end overrides automatic selection.
@@ -50,12 +115,12 @@ Pass `lyric_query` to prefer a window beginning at that lyric's LRC line.
 The selector normalizes full-width characters, case, punctuation and whitespace,
 preserves Latin word boundaries and mixed-language character order, and ranks
 whole-line matches above prefixes and contained fragments. Short fragments require
-a whole-line match. A query may span up to four adjacent lines with gaps of at most
-five seconds; the entire match must fit in the window. Repeated matches use window
+a whole-line match. In short-window mode, a query may span up to four adjacent lines with gaps of at most
+five seconds; the entire match must fit in the window. Complete excerpts use the rules above. Repeated matches use window
 quality, then the earliest occurrence, to break ties. Near the end of a song, a
 short excerpt is allowed without prepending earlier lines. Matching within a line
 starts singing at the beginning of that whole line, not halfway through it.
-Explicit start/end still wins. An unmatched/unusable query falls back to the
+Explicit start/end still wins. An unmatched/unusable short query falls back to the
 requested `random` or `chorus` strategy; selection metadata records the lyric
 query, match text/times/kind, or fallback reason. These matches rely on LRC timing.
 

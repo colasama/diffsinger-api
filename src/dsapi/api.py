@@ -25,13 +25,14 @@ from threading import Lock
 from typing import Annotated, Literal
 
 import numpy as np
+import yaml
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import audio, onnx_backend, resolver, settings, sources, tools
-from .pipeline import Job, JobSpec, voicebank
+from . import audio, onnx_backend, resolver, settings, sources, tools, voices
+from .pipeline import Job, JobSpec, voicebank, inference_lock
 from .score import Note, Phrase, Syllable, render_score
 
 API_KEY = os.environ.get("DSAPI_KEY", "")
@@ -55,7 +56,7 @@ def _load_api_keys(raw: str, legacy_key: str) -> dict[str, str]:
 
 
 API_KEYS = _load_api_keys(os.environ.get("DSAPI_KEYS", "{}"), API_KEY)
-ATTRIBUTION = "AI 合成 · 声库：用户固定音源 · 引擎：DiffSinger"
+MAX_LYRIC_TEXT = 16384
 
 # Separation and torch models are memory heavy; run one job at a time.
 _executor = ThreadPoolExecutor(max_workers=1)
@@ -105,14 +106,35 @@ class TaskIn(BaseModel):
     modes: list[str] = Field(default_factory=lambda: ["mimic", "score"])
     selection: Literal["random", "chorus"] = "random"
     seed: int | None = None
-    lyric_query: str | None = Field(default=None, max_length=512)
+    lyric_query: str | None = Field(default=None, max_length=MAX_LYRIC_TEXT)
+    lyric_extent: Literal["auto", "window", "exact"] = "auto"
+    voice_id: str = voices.DEFAULT_VOICE
+    synthesis_seed: int | None = Field(default=None, ge=0, le=2**32-1)
+
+
+def validate_voice(voice_id: str) -> None:
+    try:
+        voice = voices.get(voice_id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    try:
+        voice.validate()
+    except (OSError, ValueError, KeyError, yaml.YAMLError) as exc:
+        raise HTTPException(503, f"音源 {voice.name} 暂不可用") from exc
+
+
+@app.get("/voices", dependencies=[Depends(auth)])
+def list_voices() -> dict:
+    return voices.catalog()
 
 
 @app.post("/release_task", dependencies=[Depends(auth)])
 def release_task(body: TaskIn, owner: Owner = LEGACY_OWNER) -> dict:
+    validate_voice(body.voice_id)
     task_id = uuid.uuid4().hex[:12]
     job = Job(task_id, JobSpec(song_id=body.song_id, start=body.start, end=body.end, modes=body.modes,
-                               selection=body.selection, seed=body.seed, lyric_query=body.lyric_query), owner_id=owner)
+                               selection=body.selection, seed=body.seed, lyric_query=body.lyric_query,
+                               lyric_extent=body.lyric_extent, voice_id=body.voice_id, synthesis_seed=body.synthesis_seed), owner_id=owner)
     _jobs[task_id] = job
     _job_futures[task_id] = _executor.submit(job.run)
     return {"task_id": task_id}
@@ -126,9 +148,13 @@ def release_task_upload(audio_file: UploadFile = File(...), lrc_file: UploadFile
                         lrc_text: str = Form(""), start: float | None = Form(None), end: float | None = Form(None),
                         modes: str = Form("mimic,score"),
                         selection: Literal["random", "chorus"] = Form("random"),
-                        seed: int | None = Form(None), lyric_query: str | None = Form(None, max_length=512),
+                        seed: int | None = Form(None), lyric_query: str | None = Form(None, max_length=MAX_LYRIC_TEXT),
+                        voice_id: str = Form(voices.DEFAULT_VOICE),
+                        lyric_extent: Literal["auto", "window", "exact"] = Form("auto"),
+                        synthesis_seed: int | None = Form(None, ge=0, le=2**32-1),
                         owner: Owner = LEGACY_OWNER) -> dict:
     """Same pipeline for a song the source cannot provide: your own audio + LRC."""
+    validate_voice(voice_id)
     lrc = lrc_file.file.read().decode("utf-8-sig", errors="replace") if lrc_file else lrc_text
     if not lrc.strip():
         raise HTTPException(400, "LRC lyrics are required (lrc_file or lrc_text)")
@@ -150,7 +176,8 @@ def release_task_upload(audio_file: UploadFile = File(...), lrc_file: UploadFile
     (d / "lyrics.lrc").write_text(lrc, encoding="utf8")
     job = Job(task_id, JobSpec(audio_path=str(audio_path), lrc_path=str(d / "lyrics.lrc"), start=start, end=end,
                                modes=[m for m in modes.split(",") if m], selection=selection, seed=seed,
-                               lyric_query=lyric_query), owner_id=owner)
+                               lyric_query=lyric_query, lyric_extent=lyric_extent, voice_id=voice_id,
+                               synthesis_seed=synthesis_seed), owner_id=owner)
     _jobs[task_id] = job
     _job_futures[task_id] = _executor.submit(job.run)
     return {"task_id": task_id}
@@ -175,6 +202,7 @@ def _state(task_id: str, owner: str) -> dict:
         raise HTTPException(404, "unknown task")
     if (state.pop("owner_id", None) or LEGACY_OWNER) != owner:
         raise HTTPException(404, "unknown task")
+    state["voice"] = state.get("voice") or voices.get("imported-fixed").snapshot()
     return state
 
 
@@ -189,7 +217,8 @@ def query_result(task_id: str, owner: Owner = LEGACY_OWNER) -> dict:
         if started is not None and (end is not None or st["status"] == "running") else None
     )
     st["outputs"] = {k: f"/v1/audio?task_id={task_id}&kind={k}" for k in st["outputs"]}
-    st["attribution"] = ATTRIBUTION
+    st["voice"] = st.get("voice") or voices.get("imported-fixed").snapshot()
+    st["attribution"] = f"AI 合成 · 声库：{st['voice']['name']} · 引擎：DiffSinger"
     ev = settings.WORK / task_id / "eval.json"
     st["evaluation"] = json.loads(ev.read_text()) if ev.is_file() else None
     return st
@@ -236,11 +265,19 @@ class SyllableIn(BaseModel):
 
 class ScoreIn(BaseModel):
     phrases: list[list[SyllableIn]]
+    voice_id: str = voices.DEFAULT_VOICE
+    synthesis_seed: int | None = Field(default=None, ge=0, le=2**32-1)
 
 
 @app.post("/render_score", dependencies=[Depends(auth)])
 def render(body: ScoreIn) -> FileResponse:
-    vb = voicebank()
+    validate_voice(body.voice_id)
+    with inference_lock:
+        return _render(body)
+
+
+def _render(body: ScoreIn) -> FileResponse:
+    vb = voicebank(body.voice_id, body.synthesis_seed)
     phrases = [Phrase([Syllable(s.text, s.pinyin, [Note(n.start, n.dur, n.midi) for n in s.notes], s.lang) for s in p])
                for p in body.phrases if p]
     if not phrases:
@@ -270,7 +307,7 @@ def tasks(limit: Annotated[int, Query(ge=1, le=1000)] = 30, owner: Owner = LEGAC
                 if exc.status_code == 404:
                     continue
                 raise
-            out.append({k: st.get(k) for k in ("task_id", "status", "stage", "song", "window", "error")})
+            out.append({k: st.get(k) for k in ("task_id", "status", "stage", "song", "window", "error", "voice")})
             if len(out) >= limit:
                 break
     return out
@@ -309,14 +346,30 @@ def search(q: str, limit: int = 10) -> list[dict]:
     return [vars(s) for s in sources.get_source().search(q, limit)]
 
 
-@app.get("/resolve_song", dependencies=[Depends(auth)])
-def resolve_song(q: str = Query(min_length=1, max_length=512)) -> dict:
-    if not resolver.lyric_match.tokens(q):
-        raise HTTPException(422, "query must contain a song title or lyrics")
-    resolved = resolver.resolve(sources.get_source(), q)
+class ResolveIn(BaseModel):
+    q: str = Field(min_length=1, max_length=MAX_LYRIC_TEXT)
+    lyric_extent: Literal["auto", "window", "exact"] = "auto"
+
+
+def _resolve(q: str, lyric_extent: str = "auto") -> dict:
+    try:
+        resolved = resolver.resolve(sources.get_source(), q, lyric_extent)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     if resolved is None:
         raise HTTPException(404, "no matching song")
     return resolved
+
+
+@app.get("/resolve_song", dependencies=[Depends(auth)])
+def resolve_song(q: str = Query(min_length=1, max_length=MAX_LYRIC_TEXT),
+                 lyric_extent: Literal["auto", "window", "exact"] = "auto") -> dict:
+    return _resolve(q, lyric_extent)
+
+
+@app.post("/resolve_song", dependencies=[Depends(auth)])
+def resolve_song_post(body: ResolveIn) -> dict:
+    return _resolve(body.q, body.lyric_extent)
 
 
 if settings.WEBUI:

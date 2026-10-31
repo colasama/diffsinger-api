@@ -8,12 +8,15 @@ import json
 import shutil
 import time
 import traceback
+import secrets
+from threading import RLock
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import numpy as np
 
-from . import audio, extract, jianpu, lrc, selection, settings, sources, tools
+from . import audio, extract, jianpu, lrc, selection, settings, sources, tools, voices
 from .score import Phrase, render_mimic, render_score
 from .voicebank import Voicebank
 
@@ -31,6 +34,9 @@ class JobSpec:
     selection: str = "random"
     seed: int | None = None
     lyric_query: str | None = None
+    lyric_extent: str = "auto"
+    voice_id: str = voices.DEFAULT_VOICE
+    synthesis_seed: int | None = None
 
 
 @dataclass
@@ -53,24 +59,25 @@ class JobState:
     jianpu: str | None = None
     outputs: dict[str, str] = field(default_factory=dict)
     error: str | None = None
+    voice: dict | None = None
     owner_id: str | None = None
 
 
-_vb: Voicebank | None = None
+inference_lock = RLock()
 
 
-def voicebank() -> Voicebank:
-    global _vb
-    if _vb is None:
-        _vb = Voicebank()
-    return _vb
+def voicebank(voice_id: str | None = None, seed: int | None = None) -> Voicebank:
+    voice = voices.get(voice_id)
+    return Voicebank(voice.root, speaker=voice.speaker, seed=seed)
 
 
 class Job:
     def __init__(self, task_id: str, spec: JobSpec, *, owner_id: str | None = None):
         self.dir = settings.WORK / task_id
         self.dir.mkdir(parents=True, exist_ok=True)
-        self.state = JobState(task_id, spec, owner_id=owner_id)
+        if spec.synthesis_seed is None:
+            spec.synthesis_seed = secrets.randbits(32)
+        self.state = JobState(task_id, spec, owner_id=owner_id, voice=voices.get(spec.voice_id).snapshot())
         self.save()
 
     def save(self) -> None:
@@ -101,7 +108,8 @@ class Job:
         st.started_at = time.time()
         self.save()
         try:
-            self._run()
+            with inference_lock:
+                self._run()
             st.status, st.stage = "done", ""
         except Exception as e:  # noqa: BLE001 - surfaced to the API caller
             st.status, st.error = "failed", f"{type(e).__name__}: {e}"
@@ -112,7 +120,7 @@ class Job:
 
     def _run(self) -> None:
         st, spec, d = self.state, self.state.spec, self.dir
-        vb = voicebank()
+        vb = voicebank(spec.voice_id, spec.synthesis_seed)
 
         with self.stage("fetch"):
             if spec.audio_path:
@@ -130,10 +138,15 @@ class Job:
             (d / "lyrics.lrc").write_text(lrc_text, encoding="utf8")
 
         with self.stage("select"):
-            lines = lrc.parse(lrc_text, duration)
+            lines = lrc.parse(lrc_text, duration, trim_gaps=spec.start is None)
             selected = selection.select(lines, duration, start=spec.start, end=spec.end,
                                         strategy=spec.selection, seed=spec.seed, max_clip=MAX_CLIP,
-                                        lyric_query=spec.lyric_query)
+                                        lyric_query=spec.lyric_query, lyric_extent=spec.lyric_extent)
+            if selected.strategy == "lyric_exact":
+                # Explicit lyrics must not lose held final syllables to the
+                # short-window parser's estimated singing-length heuristic.
+                selected = selection.select(lrc.parse(lrc_text, duration, trim_gaps=False), duration,
+                                            lyric_query=spec.lyric_query, lyric_extent="exact")
             chosen, before, after = selected.lines, selected.before, selected.after
             start, end = selected.start, selected.end
             st.selection = selected.metadata()
@@ -145,7 +158,7 @@ class Job:
             clip = audio.cut(src, d / "clip.wav", start, end)
 
         with self.stage("separate"):
-            lead_path, inst_path = audio.separate_vocals(clip, d / "sep")
+            lead_path, inst_path = audio.separate_long_vocals(clip, d / "sep")
             lead = audio.load(lead_path)
 
         with self.stage("align"):
@@ -175,6 +188,8 @@ class Job:
         with self.stage("build"):
             phrases, report = extract.build_phrases(vb, segs, sofa, notes, f0)
             st.alignment = report
+            if any("error" in item for item in report):
+                raise RuntimeError("Alignment failed for part of the requested lyrics")
             if not phrases:
                 raise RuntimeError("alignment produced no usable phrases")
 
@@ -190,21 +205,34 @@ class Job:
         n = len(lead)
         if "mimic" in spec.modes:
             with self.stage("render_mimic"):
-                self._mix("mimic", [(p, render_mimic(vb, p)) for p in phrases], n)
+                self._mix("mimic", ((p, render_mimic(vb, p)) for p in phrases), n)
         if "score" in spec.modes:
             with self.stage("render_score"):
-                self._mix("score", [(p, render_score(vb, p)) for p in q], n)
+                self._mix("score", ((p, render_score(vb, p)) for p in q), n)
         st.outputs["lead"] = str(audio.to_mp3(lead_path, d / "lead.mp3", loudnorm=False))
         st.outputs["clip"] = str(audio.to_mp3(clip, d / "clip.mp3", loudnorm=False))
 
-    def _mix(self, kind: str, rendered: list[tuple[Phrase, np.ndarray]], n: int) -> None:
+    def _mix(self, kind: str, rendered: Iterable[tuple[Phrase, np.ndarray]], n: int) -> None:
         out = np.zeros(n + settings.SAMPLE_RATE, np.float32)
+        boundaries = []
         for p, wav in rendered:
             s = max(0, int(round(_phrase_start(p, kind) * settings.SAMPLE_RATE)))
             seg = wav[: len(out) - s]
             out[s:s + len(seg)] += seg
+            boundaries.append(min(n, s + len(seg)))
         wav_path = audio.save(self.dir / f"{kind}.wav", out[:n])
-        self.state.outputs[kind] = str(audio.to_mp3(wav_path, self.dir / f"{kind}.mp3"))
+        mp3 = audio.to_mp3(wav_path, self.dir / f"{kind}.mp3")
+        self.state.outputs[kind] = str(mp3)
+        # QQ clients can download each bounded part without buffering a whole song.
+        if mp3.stat().st_size > 28 * 1024 * 1024:
+            start, i = 0, 0
+            while start < n:
+                target = min(n, start + settings.SAMPLE_RATE * 600)
+                stop = max((b for b in boundaries if start < b <= target), default=target) if target < n else n
+                part = audio.save(self.dir / f"{kind}_part_{i:04}.wav", out[start:stop])
+                self.state.outputs[f"{kind}_part_{i:04}"] = str(audio.to_mp3(part, part.with_suffix(".mp3")))
+                part.unlink()
+                start, i = stop, i + 1
 
 
 def _phrase_start(p: Phrase, kind: str) -> float:

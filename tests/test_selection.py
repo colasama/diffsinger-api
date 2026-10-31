@@ -33,7 +33,8 @@ def test_manual_window_wins_and_never_clips_half_a_line():
     result = selection.select(song(), 120, start=0, end=110)
     assert result.strategy == 'manual' and result.seed is None
     assert all(ln.end <= result.end for ln in result.lines)
-    assert result.end-result.start <= 40
+    assert result.lines == song()
+    assert result.end-result.start == 111
     assert result.after == []
 
 

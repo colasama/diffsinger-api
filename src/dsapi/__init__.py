@@ -11,6 +11,9 @@ def main() -> None:
     run.add_argument("--end", type=float)
     run.add_argument("--modes", default="mimic,score")
     run.add_argument("--task-id")
+    run.add_argument("--voice", default="imported-voice-e")
+    run.add_argument("--synthesis-seed", type=int)
+    run.add_argument("--lyric-extent", choices=("auto", "window", "exact"), default="auto")
     run.add_argument("--selection", choices=("random", "chorus"), default="random")
     run.add_argument("--seed", type=int, help="reproduce a random lyric window")
     run.add_argument("--lyric-query", help="prefer an excerpt starting at this lyric line")
@@ -28,7 +31,8 @@ def main() -> None:
         task_id = args.task_id or f"song{args.song_id}"
         st = Job(task_id, JobSpec(song_id=args.song_id, start=args.start, end=args.end,
                                   modes=args.modes.split(","), selection=args.selection, seed=args.seed,
-                                  lyric_query=args.lyric_query)).run()
+                                  lyric_query=args.lyric_query, lyric_extent=args.lyric_extent,
+                                  voice_id=args.voice, synthesis_seed=args.synthesis_seed)).run()
         print(st.jianpu or "")
         print(json.dumps({"status": st.status, "error": st.error, "timings": st.timings,
                           "window": st.window, "alignment": st.alignment, "outputs": st.outputs},

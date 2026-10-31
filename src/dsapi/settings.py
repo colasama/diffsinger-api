@@ -18,6 +18,7 @@ WORK = Path(os.environ.get("DSAPI_WORK", ROOT / "work"))
 
 VOICEBANK = MODELS / "imported-fixed" / "voicebank"
 VOCODER = MODELS / "vocoder"
+MULTI_VOICE = Path(os.environ.get("DSAPI_MULTI_VOICE", MODELS / "multi_voice" / "version1"))
 SOME_CKPT = MODELS / "some" / "0119_continuous256_5spk" / "model_ckpt_steps_100000_simplified.ckpt"
 NOTE_EXTRACTOR = os.environ.get("DSAPI_NOTE_EXTRACTOR", "game-medium").strip().lower()
 GAME_MODEL = MODELS / "game" / "GAME-1.0.3-medium-onnx"

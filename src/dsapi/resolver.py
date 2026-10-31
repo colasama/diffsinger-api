@@ -4,6 +4,7 @@ import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import asdict
+from itertools import zip_longest
 from threading import BoundedSemaphore, Lock
 
 from . import lrc, lyric_match, sources
@@ -32,17 +33,24 @@ def _lyric(source: sources.Source, song_id: str) -> str:
     return text
 
 
-def resolve(source: sources.Source, query: str) -> dict | None:
+def resolve(source: sources.Source, query: str, lyric_extent: str = "auto") -> dict | None:
     query = query.strip()
     needle = lyric_match.tokens(query)
     if not needle:
         raise ValueError("query must contain a song title or lyrics")
     songs = []
     seen = set()
-    for song in source.search(query, limit=10)[:10]:
-        if song.id.strip() and song.id not in seen:
-            seen.add(song.id)
-            songs.append(song)
+    parts = lyric_match.sentences(query)
+    queries = [query]
+    if len(parts) >= 3 or len(query) > 512:
+        # Search excerpts, but only accept candidates verified against ALL lyrics.
+        queries = list(dict.fromkeys([max(parts, key=len)[:200], parts[0][:200], parts[-1][:200]]))
+    candidates = [source.search(q, limit=10)[:10] for q in queries]
+    for row in zip_longest(*candidates):
+        for song in row:
+            if song is not None and song.id.strip() and song.id not in seen and len(songs) < 10:
+                seen.add(song.id)
+                songs.append(song)
     if not songs:
         return None
 
@@ -80,7 +88,15 @@ def resolve(source: sources.Source, query: str) -> dict | None:
             # Unknown duration is provisional; the job rechecks against audio.
             duration = song.duration_ms / 1000 if song.duration_ms and song.duration_ms > 0 else 86400.
             lines = lrc.parse(future.result(), duration)
-            match = lyric_match.pick_window(lines, query)
+            full = lyric_match.full_match(lines, query, lyric_extent)
+            match = None if full else lyric_match.pick_window(lines, query)
+            if full:
+                if song.duration_ms and song.duration_ms > 0:
+                    lines = lrc.parse(future.result(), duration, trim_gaps=False)
+                hits.append((full.rank, -index, song, full.metadata(lines)))
+                continue
+            if lyric_match.requires_full_match(query, lyric_extent):
+                continue
         except Exception:
             _log.debug("Candidate lyrics unavailable: song=%s", song.id, exc_info=True)
             continue
@@ -90,5 +106,7 @@ def resolve(source: sources.Source, query: str) -> dict | None:
     if hits:
         _, _, song, match = max(hits, key=lambda hit: hit[:2])
         return result(song, "lyric", lyric_query=query, match=match)
+    if lyric_match.requires_full_match(query, lyric_extent):
+        raise ValueError("完整歌词未匹配，请检查歌词内容与歌曲版本")
     reason = "lyrics_unavailable_or_no_match" if len(done) < len(songs) else "no_reliable_lyric_match"
     return result(songs[0], "fallback", fallback_reason=reason)

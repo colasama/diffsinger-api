@@ -7,7 +7,7 @@ from dsapi import api, sources
 
 
 @pytest.fixture
-def client(monkeypatch, tmp_path):
+def client(monkeypatch, tmp_path, voice_files):
     monkeypatch.setattr(api.settings, 'WORK', tmp_path)
     monkeypatch.setattr(api, 'API_KEY', '')
     monkeypatch.setattr(api, 'API_KEYS', {})
@@ -36,6 +36,13 @@ def test_upload_supports_reproducible_random_selection(client):
     assert spec.selection == 'random' and spec.seed == 42
 
 
+def test_explicit_long_range_preserves_zero_start(client):
+    response = client.post('/release_task', json={'song_id': '1', 'start': 0, 'end': 120})
+    assert response.status_code == 200
+    spec = api._jobs[response.json()['task_id']].state.spec
+    assert spec.start == 0 and spec.end == 120
+
+
 def test_lyric_query_persisted_for_both_submission_routes(client):
     query = '迎着风向前走'
     response = client.post('/release_task', json={'song_id': '1', 'lyric_query': query})
@@ -46,7 +53,7 @@ def test_lyric_query_persisted_for_both_submission_routes(client):
                            data={'lrc_text': '[00:01]迎着风向前走', 'lyric_query': query})
     assert response.status_code == 200
     assert api._jobs[response.json()['task_id']].state.spec.lyric_query == query
-    assert client.post('/release_task', json={'song_id': '1', 'lyric_query': 'a' * 513}).status_code == 422
+    assert client.post('/release_task', json={'song_id': '1', 'lyric_query': 'a' * (api.MAX_LYRIC_TEXT + 1)}).status_code == 422
 
 
 def test_resolve_route_title_artist_errors_and_auth(client, monkeypatch):
@@ -59,7 +66,7 @@ def test_resolve_route_title_artist_errors_and_auth(client, monkeypatch):
     assert result.status_code == 200
     assert result.json()['song']['id'] == 'original'
     assert result.json()['match_type'] == 'title_artist'
-    for q in ['', '  ', '！！！', 'a' * 513]:
+    for q in ['', '  ', '！！！', 'a' * (api.MAX_LYRIC_TEXT + 1)]:
         assert client.get('/resolve_song', params={'q': q}).status_code == 422
     monkeypatch.setattr(Source, 'search', lambda *args, **kwargs: [])
     assert client.get('/resolve_song', params={'q': '不存在'}).status_code == 404

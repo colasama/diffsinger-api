@@ -84,7 +84,7 @@ def test_pipeline_forwards_anchor_and_saves_selected_window(tmp_path, monkeypatc
     lyrics = tmp_path / 'input.lrc'
     lyrics.write_text('[00:00]我们一起出发吧\n[00:20]迎着风向前走\n[00:25]我们一起出发吧')
     monkeypatch.setattr(pipeline.settings, 'WORK', tmp_path / 'work')
-    monkeypatch.setattr(pipeline, 'voicebank', lambda: None)
+    monkeypatch.setattr(pipeline, 'voicebank', lambda *args: None)
     monkeypatch.setattr(pipeline.audio, 'duration', lambda _: 30.)
 
     def stop_at_cut(source, target, start, end):

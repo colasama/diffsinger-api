@@ -63,7 +63,7 @@ th { color: var(--muted); font-weight: 500; }
 <body>
 <header>
   <h1>dsapi</h1>
-  <span class="attr">AI 合成 · 声库：用户固定音源 · 引擎：DiffSinger</span>
+  <span class="attr">AI 合成 · 引擎：DiffSinger</span>
   <span class="attr" id="runtime" role="status">合成后端：读取中…</span>
   <span class="key">API key <input id="apikey" type="password" style="width:140px" placeholder="未设置可留空"></span>
 </header>
@@ -93,6 +93,10 @@ th { color: var(--muted); font-weight: 500; }
         <div><label>开始（秒，可选）</label><input id="start" inputmode="decimal"></div>
         <div><label>结束（秒，可选）</label><input id="end" inputmode="decimal"></div>
       </div>
+      <label for="voice">音源</label><select id="voice"><option value="imported-voice-e">用户音源戊</option></select>
+      <label for="lyricQuery">指定歌词（可多行，三句及以上完整选段）</label>
+      <textarea id="lyricQuery" style="min-height:80px" maxlength="16384"></textarea>
+      <label for="lyricExtent">歌词范围</label><select id="lyricExtent"><option value="auto">自动判断</option><option value="exact">完整指定歌词</option><option value="window">短片段</option></select>
       <label for="selection">自动选段（未填写时间时）</label>
       <select id="selection"><option value="random">随机选择连续歌词</option><option value="chorus">选择评分最高的连续歌词</option></select>
       <div class="checks">
@@ -111,7 +115,8 @@ th { color: var(--muted); font-weight: 500; }
     <section id="detail"><p class="muted">选择或提交一个任务。</p></section>
     <section>
       <div class="head"><h2>乐谱合成</h2><button id="renderBtn">合成</button></div>
-      <p class="muted" style="font-size:12px;margin:0 0 8px">编辑 score.json（时间单位为秒，midi 为音高）后直接用用户固定音源合成，不经过提取流程。</p>
+      <p class="muted" style="font-size:12px;margin:0 0 8px">编辑 score.json（时间单位为秒，midi 为音高）后用所选音源合成，不经过提取流程。</p>
+      <label for="renderVoice">音源</label><select id="renderVoice"></select>
       <textarea id="scoreText" spellcheck="false"></textarea>
       <div id="renderOut" style="margin-top:10px"></div>
     </section>
@@ -144,6 +149,7 @@ $("apikey").addEventListener("change", (e) => {
   $("tasks").replaceChildren();
   loadTasks();
   loadRuntime();
+  loadVoices();
 });
 
 function withKey(url) {
@@ -157,6 +163,24 @@ async function api(path, opts = {}) {
 }
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const fmtTime = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`;
+
+async function loadVoices() {
+  const version = keyVersion;
+  try {
+    const catalog = await (await api("/voices")).json();
+    if (version !== keyVersion) return;
+    for (const id of ["voice", "renderVoice"]) {
+      const select = $(id), previous = select.value;
+      select.replaceChildren(...catalog.voices.map(v => {
+        const option = document.createElement("option");
+        option.value = v.id; option.textContent = v.name + (v.available ? "" : "（暂不可用）");
+        option.disabled = !v.available;
+        return option;
+      }));
+      select.value = previous || catalog.default_voice_id;
+    }
+  } catch (e) { console.error("音源列表加载失败", e); }
+}
 
 async function loadRuntime() {
   const node = $("runtime");
@@ -204,7 +228,7 @@ $("submit").onclick = async () => {
   if (isNaN(s) !== isNaN(en)) return alert("请同时填写开始和结束时间，或都留空");
   let req;
   if (srcMode() === "id") {
-    const body = { song_id: $("songId").value.trim(), modes, selection: $("selection").value };
+    const body = { song_id: $("songId").value.trim(), modes, selection: $("selection").value, voice_id: $("voice").value, lyric_query: $("lyricQuery").value || null, lyric_extent: $("lyricExtent").value };
     if (!body.song_id) return alert("请填写歌曲 ID");
     if (windowSet) Object.assign(body, { start: s, end: en });
     req = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
@@ -216,6 +240,9 @@ $("submit").onclick = async () => {
     form.append("audio_file", audio);
     if ($("lrcFile").files[0]) form.append("lrc_file", $("lrcFile").files[0]);
     else form.append("lrc_text", $("lrcText").value);
+    form.append("voice_id", $("voice").value);
+    form.append("lyric_query", $("lyricQuery").value);
+    form.append("lyric_extent", $("lyricExtent").value);
     form.append("modes", modes.join(","));
     form.append("selection", $("selection").value);
     if (windowSet) { form.append("start", s); form.append("end", en); }
@@ -364,6 +391,7 @@ function renderDetail(st) {
       <h2>${esc(st.song?.name || st.task_id)} ${st.song?.artists ? `<span class="muted" style="text-transform:none">· ${esc(st.song.artists.join(" / "))}</span>` : ""}</h2>
       <span id="taskStatus" class="badge ${st.status}"></span>
     </div>
+    <p class="muted">${esc(st.attribution)}</p>
     <div class="stages">${stages}</div>
     ${st.window ? `<p class="muted" style="margin:0 0 10px">片段 ${fmtTime(st.window[0])}–${fmtTime(st.window[1])}${st.tonic ? ` · 1=${esc(st.tonic)} · ♩=${st.grid?.bpm}` : ""}</p>` : ""}
     ${st.error ? `<p class="err">${esc(st.error)}</p>` : ""}`;
@@ -393,6 +421,7 @@ function renderDetail(st) {
     ${rows ? `<div style="overflow-x:auto"><table>${rows}</table></div>` : `<p class="muted" style="margin:0">用 pyin 测音高、用 SOFA 重新对齐渲染结果，约 15 秒。</p>`}`;
 }
 
+$("renderVoice").value = st.voice?.id || "imported-fixed";
 $("scoreText").value = JSON.stringify(await (await api(`/v1/score?task_id=${st.task_id}`)).json(), null, 1); $("scoreText").scrollIntoView({ behavior: "smooth" }); }
     catch (e) { alert(e.message); }
   };
@@ -417,6 +446,7 @@ $("scoreText").value = JSON.stringify({ phrases: [[..."一闪一闪亮晶晶"].m
 $("renderBtn").onclick = async () => {
   let body;
   try { body = JSON.parse($("scoreText").value); } catch (e) { return alert("JSON 格式错误：" + e.message); }
+  body.voice_id = $("renderVoice").value;
   $("renderBtn").disabled = true;
   $("renderOut").innerHTML = `<span class="muted">合成中…</span>`;
   try {
@@ -427,6 +457,7 @@ $("renderBtn").onclick = async () => {
 };
 
 loadTasks();
+loadVoices();
 loadRuntime();
 setInterval(loadRuntime, 5000);
 </script>

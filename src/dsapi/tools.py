@@ -62,7 +62,7 @@ class _Worker:
             try:
                 self.proc.stdin.write(json.dumps({"args": args, "log": str(log)}) + "\n")
                 self.proc.stdin.flush()
-                timeout = float(os.environ.get("DSAPI_WORKER_TIMEOUT", "600"))
+                timeout = float(os.environ.get("DSAPI_WORKER_TIMEOUT", str(_work_timeout(args))))
                 if not select.select([self.proc.stdout], [], [], timeout)[0]:
                     raise TimeoutError(f"worker exceeded {timeout:g}s")
                 line = self.proc.stdout.readline()
@@ -75,6 +75,19 @@ class _Worker:
             if not result["ok"]:
                 raise RuntimeError(f"{self.script}: {result['error']}\n{_log_tail(log)}")
             self.info = {k: v for k, v in result.items() if k != "ok"}
+
+
+def _work_timeout(args: tuple[str, ...]) -> float:
+    import soundfile as sf
+
+    seconds = 0.0
+    for arg in args:
+        path = Path(arg)
+        if path.suffix.lower() == ".wav" and path.is_file():
+            seconds = max(seconds, sf.info(path).duration)
+        elif path.is_dir():
+            seconds = max(seconds, sum(sf.info(wav).duration for wav in path.glob("*.wav")))
+    return max(600.0, seconds * 30.0)
 
 
 def _log_tail(log: Path) -> str:

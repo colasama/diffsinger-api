@@ -61,3 +61,29 @@ def test_multisyllable_word_preserves_vowels_phones_and_score_roundtrip(vb):
     assert all(d > 0 for d in word_dur)
     with pytest.raises(KeyError):
         vb.g2p('hello~4', 'en')
+
+
+def test_symbol_only_export_uses_validated_cmu_lexicon(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    root=tmp_path/'dur';root.mkdir()
+    (root/'dsdict-en.yaml').write_text('symbols:\n- symbol: en/#r\n  type: vowel\n- symbol: en/ax\n  type: vowel\n- symbol: en/ow\n  type: vowel\n')
+    monkeypatch.setattr(settings,'HUBERTFA_MODEL',tmp_path/'model.onnx')
+    (tmp_path/'ds_cmudict-07b.txt').write_text('hello\thh ax l ow\nher\thh _r\ninvalid\tmissing\n\n')
+    bank=Voicebank.__new__(Voicebank)
+    phones={'en/hh':1,'en/ax':2,'en/l':3,'en/ow':4,'en/#r':5}
+    model=SimpleNamespace(root=root,phonemes=phones)
+    bank.acoustic=bank.dur=bank.pitch=bank.variance=model
+    entries,vowels=bank._load_dict('en')
+    assert entries['hello']==['en/hh','en/ax','en/l','en/ow']
+    assert entries['her']==['en/hh','en/#r'] and 'en/#r' in vowels
+    assert 'invalid' not in entries
+
+
+def test_syllabic_r_mapping_keeps_native_synthesis_phone(tmp_path, monkeypatch, vb):
+    vb.dictionaries['en']['her']=['en/hh','en/#r']
+    vb.vowels.add('en/#r')
+    monkeypatch.setattr(settings,'HUBERTFA_MODEL',tmp_path/'model.onnx')
+    (tmp_path/'vocab.json').write_text(json.dumps({'vocab':{'en/hh':1,'en/_r':2}}))
+    extract.write_segments([lrc.Line(0,1,'Her',lang='en')],np.zeros(44100),tmp_path/'segments',vb)
+    assert (tmp_path/'hubertfa_dict.txt').read_text()=='her\thh _r\n'
+    assert vb.g2p('her','en')==['en/hh','en/#r']

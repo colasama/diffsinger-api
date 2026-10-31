@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import json
+import shutil
 
 import numpy as np
 
@@ -34,7 +35,8 @@ def _in_clip(ln: Line, lo: float, hi: float) -> list[tuple[str, str, str]]:
 
 
 def write_segments(lines: list[Line], lead: np.ndarray, seg_dir: Path, vb: Voicebank,
-                   before: list[Line] = (), after: list[Line] = (), clip_start: float = 0.0) -> list[dict]:
+                   before: list[Line] = (), after: list[Line] = (), clip_start: float = 0.0,
+                   _language: str | None = None, _chunked: bool = False) -> list[dict]:
     """The whole clip as one alignment input carrying every line's syllables.
 
     LRC timestamps are often off by most of a second, so cutting per line
@@ -42,13 +44,47 @@ def write_segments(lines: list[Line], lead: np.ndarray, seg_dir: Path, vb: Voice
     Only syllables both dictionaries know are kept. `before`/`after` lines are
     aligned too (their audio is in the clip) but tagged line -1 and dropped later.
     """
+    if not _chunked and len(lead) > 60 * settings.SAMPLE_RATE and len(lines) > 1:
+        languages = {lang for ln in [*before, *lines, *after] for _, _, lang in ln.routed_units}
+        language = next(iter(languages)) if len(languages) == 1 else "mixed"
+        segments, dictionaries = [], set()
+        begin = 0
+        while begin < len(lines):
+            end = begin + 1
+            while end < len(lines) and lines[end].end - lines[begin].start <= 40:
+                end += 1
+            lo = max(0, round((lines[begin].start - clip_start - 2) * settings.SAMPLE_RATE))
+            hi = min(len(lead), round((lines[end - 1].end - clip_start + 2) * settings.SAMPLE_RATE))
+            folder = seg_dir / f"chunk_{begin:04}" / "segments"
+            items = write_segments(lines[begin:end], lead[lo:hi], folder, vb,
+                before=lines[begin-1:begin] if begin else before,
+                after=lines[end:end+1] if end < len(lines) else after,
+                clip_start=clip_start + lo / settings.SAMPLE_RATE, _language=language, _chunked=True)
+            if not items:
+                raise ValueError("A requested lyric chunk has no singable units")
+            for item in items:
+                name = f"clip_{begin:04}"
+                for suffix in (".wav", ".lab"):
+                    shutil.copyfile(folder / (item["name"] + suffix), seg_dir / (name + suffix))
+                item.update(name=name, offset=lo / settings.SAMPLE_RATE)
+                dictionaries.update(Path(item["dictionary"]).read_text().splitlines())
+                segments.append(item)
+            begin = end
+        dictionary = seg_dir.parent / "chunk_dictionary.txt"
+        dictionary.write_text("\n".join(sorted(dictionaries)) + "\n")
+        for item in segments:
+            item["dictionary"] = str(dictionary)
+        meta = {k: segments[0][k] for k in ("backend", "lang", "languages", "ckpt", "dictionary")}
+        (seg_dir.parent / "align_meta.json").write_text(json.dumps(meta))
+        (seg_dir.parent / "segments.json").write_text(json.dumps(segments, ensure_ascii=False, indent=2))
+        return segments
     seg_dir.mkdir(parents=True, exist_ok=True)
     clip_end = clip_start + len(lead) / settings.SAMPLE_RATE
     tagged = ([(-1, _in_clip(ln, clip_start - 0.3, clip_end)) for ln in before]
               + [(k, ln.routed_units) for k, ln in enumerate(lines)]
               + [(-1, _in_clip(ln, clip_start, clip_end + 0.3)) for ln in after])
     languages = sorted({lang for _, units in tagged for _, _, lang in units})
-    lang = languages[0] if len(languages) == 1 else "mixed"
+    lang = _language or (languages[0] if len(languages) == 1 else "mixed")
     backend = tools.alignment_backend(lang)
     if lang == "zh":
         dictionary = settings.HUBERTFA_DICT if backend == "hubertfa" else settings.SOFA_DICT
@@ -59,7 +95,7 @@ def write_segments(lines: list[Line], lead: np.ndarray, seg_dir: Path, vb: Voice
     chars, pinyin, line_of, word_units, word_langs = [], [], [], [], []
     for k, units in tagged:
         for c, py, unit_lang in units:
-            if (lang in ("en", "mixed") or (lang == "ja" and backend == "hubertfa")) and not known(py, unit_lang):
+            if (k >= 0 or lang in ("en", "mixed") or (lang == "ja" and backend == "hubertfa")) and not known(py, unit_lang):
                 language = {"en": "English", "ja": "Japanese", "zh": "Chinese"}[unit_lang]
                 raise ValueError(f"{language} word missing from voicebank dictionary: {py}")
             if known(py, unit_lang):
@@ -76,12 +112,13 @@ def write_segments(lines: list[Line], lead: np.ndarray, seg_dir: Path, vb: Voice
         ckpt, dictionary = settings.HUBERTFA_MODEL, seg_dir.parent / "hubertfa_dict.txt"
         vocab = json.loads((ckpt.parent / "vocab.json").read_text())["vocab"]
         pronunciations = {key: vb.g2p(u, language) for key, u, language in zip(pinyin, word_units, word_langs)}
-        unknown = {p for phones in pronunciations.values() for p in phones
-                   if ("cl" if p == "ja/cl" else p) not in vocab}
+        def align_phone(phone):
+            return {"ja/cl": "cl", "en/#r": "en/_r"}.get(phone, phone)
+        unknown = {p for phones in pronunciations.values() for p in phones if align_phone(p) not in vocab}
         if unknown:
             raise ValueError(f"Phonemes missing from HubertFA {lang} vocabulary: {sorted(unknown)}")
         dictionary.write_text("".join(
-            f"{key}\t{' '.join(p if lang == 'mixed' else p.removeprefix(lang + '/') for p in phones)}\n"
+            f"{key}\t{' '.join(align_phone(p) if lang == 'mixed' else align_phone(p).removeprefix(lang + '/') for p in phones)}\n"
             for key, phones in sorted(pronunciations.items())), encoding="utf8")
     elif lang == "zh":
         ckpt = settings.HUBERTFA_MODEL if backend == "hubertfa" else settings.SOFA_CKPT
