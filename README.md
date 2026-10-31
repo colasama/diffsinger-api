@@ -8,8 +8,8 @@ then render with a selectable voice (default: Imported Voice E / 用户音源戊
 Song id ─▶ audio + LRC ─▶ lyric window + language tags ─▶ crop ─▶ BS-RoFormer + karaoke
           ─▶ HubertFA alignment ─▶ GAME Medium notes + RMVPE f0
           ─▶ phrases ─┬─▶ mimic: real phoneme timing + source f0 ─▶ variance/acoustic/vocoder
-                      └─▶ score: grid-quantized notes ─▶ dur/pitch/variance/acoustic/vocoder
-          ─▶ 简谱 text + score.json
+                      └─▶ score: original note timing ─▶ dur/pitch/variance/acoustic/vocoder
+          ─▶ quantized 简谱 text + original-timing score.json
 ```
 
 ## Setup
@@ -334,6 +334,16 @@ MDXC overlap is explicitly set to one window, preserving the previous 8-second
 stride for the bundled BS-RoFormer and MelBand karaoke models.
 
 ## Synthesis defaults
+
+Score synthesis and `score.json` retain the extracted note timing, including
+off-grid onsets, short notes and rests. Only the displayed/exported 简谱 is
+quantized to the notation grid. `score.json` times are seconds relative to the
+clip; its BPM is descriptive and does not rescale synthesis. `/render_score`
+uses those same times, including for previously saved quantized scores.
+Timing remains subject to extraction accuracy and the synthesis frame resolution
+(512 samples at 44.1 kHz, about 11.6 ms). Score mode still predicts phoneme
+durations and pitch expression; mimic retains source phoneme timing and F0.
+Existing task outputs are not rewritten.
 
 Acoustic uses 20 sampling steps, pitch uses 10, and variance uses 20.
 Acoustic depth follows the imported voicebank's `max_depth`.

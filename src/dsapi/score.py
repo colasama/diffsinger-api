@@ -102,6 +102,10 @@ def score_inputs(vb: Voicebank, phrase: Phrase):
             note_rest.append(True)
         else:
             for n in syl.notes:
+                if n.start - note_bounds[-1] > 1e-3:
+                    note_bounds.append(n.start)
+                    note_midi.append(np.nan)
+                    note_rest.append(True)
                 note_bounds.append(n.end)
                 note_midi.append(n.midi)
                 note_rest.append(False)

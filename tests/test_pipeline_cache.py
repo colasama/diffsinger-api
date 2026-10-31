@@ -9,7 +9,8 @@ import pytest
 import soundfile as sf
 
 from dsapi import pipeline, settings, sources
-from dsapi.pipeline import Job, JobSpec
+from dsapi.pipeline import Job, JobSpec, _score_json
+from dsapi.jianpu import quantize, render as render_jianpu
 from dsapi.score import Note, Phrase, Syllable
 
 
@@ -172,3 +173,35 @@ def test_simultaneous_same_song_prefetch_downloads_only_once(environment, monkey
     assert environment[0]['fetch'] == 1
     assert sorted(r['cache_hit'] for r in results) == [False, True]
     assert all(job.state.status == 'queued' for job in jobs)
+
+
+@pytest.mark.parametrize('modes', [['score'], ['mimic', 'score']])
+def test_score_keeps_extracted_timing_while_notation_is_quantized(environment, monkeypatch, modes):
+    phrases = [Phrase([
+        Syllable('你', 'ni', [Note(.11, .08, 60), Note(.19, .12, 62)]),
+        Syllable('好', 'hao', [Note(.36, .21, 64)]),
+    ], phones=[('i', .11, .31), ('SP', .31, .36), ('ao', .36, .57)],
+        f0_midi=np.full(50, 60.))]
+    grid = pipeline.jianpu.Grid(120, 0)
+    expected = _score_json(phrases, grid)
+    notation = quantize(phrases, grid)
+    assert _score_json(notation, grid) != expected
+    seen = {}
+
+    def render(mode, phrase):
+        seen[mode] = _score_json([phrase], grid)
+        return np.ones(100)
+
+    monkeypatch.setattr(pipeline.extract, 'build_phrases', lambda *a: (phrases, []))
+    monkeypatch.setattr(pipeline.jianpu, 'quantize', quantize)
+    monkeypatch.setattr(pipeline.jianpu, 'render', render_jianpu)
+    monkeypatch.setattr(pipeline, '_score_json', _score_json)
+    monkeypatch.setattr(pipeline, 'render_score', lambda vb, p: render('score', p))
+    monkeypatch.setattr(pipeline, 'render_mimic', lambda vb, p: render('mimic', p))
+    job = Job('timing', JobSpec(song_id='1', start=0, end=1, modes=modes))
+    result = job.run()
+    assert result.status == 'done', result.error
+    assert json.loads((job.dir / 'score.json').read_text()) == expected
+    assert seen == {mode: expected for mode in modes}
+    assert _score_json(phrases, grid) == expected
+    assert (job.dir / 'jianpu.txt').read_text() == render_jianpu(notation, grid, 0)

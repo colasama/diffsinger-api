@@ -314,11 +314,11 @@ class Job:
             with self.stage("quantize"):
                 grid = jianpu.estimate_grid(inst_path, phrases)
                 tonic = jianpu.estimate_tonic(phrases)
-                q = jianpu.quantize(phrases, grid)
+                notation = jianpu.quantize(phrases, grid)
                 st.grid, st.tonic = asdict(grid), jianpu._NAMES[tonic]
-                st.jianpu = jianpu.render(q, grid, tonic)
+                st.jianpu = jianpu.render(notation, grid, tonic)
                 (d / "jianpu.txt").write_text(st.jianpu, encoding="utf8")
-                (d / "score.json").write_text(json.dumps(_score_json(q, grid), ensure_ascii=False, indent=1))
+                (d / "score.json").write_text(json.dumps(_score_json(phrases, grid), ensure_ascii=False, indent=1))
 
         n = len(lead)
         if "mimic" in spec.modes:
@@ -326,7 +326,7 @@ class Job:
                 self._mix("mimic", ((p, render_mimic(vb, p)) for p in phrases), n, inst_path, lead_path)
         if "score" in spec.modes:
             with self.stage("render_score"):
-                self._mix("score", ((p, render_score(vb, p)) for p in q), n, inst_path, lead_path)
+                self._mix("score", ((p, render_score(vb, p)) for p in phrases), n, inst_path, lead_path)
         st.metrics.update({f"synthesis_{key}_seconds": round(value, 4)
                            for key, value in getattr(vb, "timings", {}).items()})
         with self.measure("reference_encode_seconds"):
@@ -338,8 +338,9 @@ class Job:
         out = np.zeros(n + settings.SAMPLE_RATE, np.float32)
         boundaries = []
         for p, wav in rendered:
-            s = max(0, int(round(_phrase_start(p, kind) * settings.SAMPLE_RATE)))
-            seg = wav[: len(out) - s]
+            offset = int(round(_phrase_start(p, kind) * settings.SAMPLE_RATE))
+            s, skip = max(0, offset), max(0, -offset)
+            seg = wav[skip:skip + max(0, len(out) - s)]
             out[s:s + len(seg)] += seg
             boundaries.append(min(n, s + len(seg)))
         wav_path = audio.save(self.dir / f"{kind}.wav", out[:n], subtype="FLOAT")
@@ -379,7 +380,7 @@ def _to_wav(src: Path, dst: Path) -> Path:
 
 
 def _score_json(phrases: list[Phrase], grid: jianpu.Grid) -> dict:
-    """Engine-independent score: what a future `.sing` 简谱 input would produce."""
+    """Synthesis score with extracted timing in seconds; BPM is notation metadata."""
     return {
         "bpm": grid.bpm,
         "phrases": [[{"text": s.text, "pinyin": s.pinyin, "lang": s.lang,

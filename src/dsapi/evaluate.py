@@ -3,7 +3,7 @@
 - mimic pitch: rendered f0 vs the source f0 it was given (cents)
 - mimic intelligibility: re-align the render with the task's original aligner
   and compare word onsets with the source alignment
-- score pitch: rendered f0 per note vs the quantized score's midi
+- score pitch: rendered f0 per note vs the saved synthesis score's midi
 """
 
 import json

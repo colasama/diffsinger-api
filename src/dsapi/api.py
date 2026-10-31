@@ -334,8 +334,9 @@ def _render(body: ScoreIn) -> FileResponse:
     out = np.zeros(int(end * settings.SAMPLE_RATE), np.float32)
     for p in phrases:
         wav = render_score(vb, p)
-        s = max(0, int(round(p.start * settings.SAMPLE_RATE)))
-        seg = wav[: len(out) - s]
+        offset = int(round(p.start * settings.SAMPLE_RATE))
+        s, skip = max(0, offset), max(0, -offset)
+        seg = wav[skip:skip + max(0, len(out) - s)]
         out[s:s + len(seg)] += seg
     d = settings.WORK / "render" / uuid.uuid4().hex[:12]
     d.mkdir(parents=True, exist_ok=True)
