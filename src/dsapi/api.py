@@ -31,7 +31,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import audio, onnx_backend, resolver, settings, sources, tools, voices
+from . import audio, cache, onnx_backend, resolver, settings, sources, tools, voices
 from .pipeline import Job, JobSpec, voicebank, inference_lock
 from .score import Note, Phrase, Syllable, render_score
 from .score_task import ScoreJob
@@ -62,6 +62,7 @@ MAX_LYRIC_TEXT = 16384
 
 # Separation and torch models are memory heavy; run one job at a time.
 _executor = ThreadPoolExecutor(max_workers=1)
+_prefetch_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="download")
 _jobs: dict[str, Job] = {}
 _job_futures: dict[str, Future] = {}
 _delete_lock = Lock()
@@ -69,13 +70,15 @@ _delete_lock = Lock()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _executor
+    global _executor, _prefetch_executor
     _executor = ThreadPoolExecutor(max_workers=1)
+    _prefetch_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="download")
     try:
         yield
     finally:
         # Finish queued jobs before closing their model workers.
         await asyncio.to_thread(_executor.shutdown, wait=True)
+        await asyncio.to_thread(_prefetch_executor.shutdown, wait=True)
         await asyncio.to_thread(tools.close_workers)
 
 
@@ -107,6 +110,7 @@ class TaskIn(BaseModel):
     end: float | None = None
     modes: list[str] = Field(default_factory=lambda: ["mimic", "score"])
     with_accompaniment: bool = False
+    audio_only: bool = False
     selection: Literal["random", "chorus"] = "random"
     seed: int | None = None
     lyric_query: str | None = Field(default=None, max_length=MAX_LYRIC_TEXT)
@@ -134,12 +138,15 @@ def list_voices() -> dict:
 @app.post("/release_task", dependencies=[Depends(auth)])
 def release_task(body: TaskIn, owner: Owner = LEGACY_OWNER) -> dict:
     validate_voice(body.voice_id)
+    if body.audio_only and body.modes != ["mimic"]:
+        raise HTTPException(422, "audio_only requires modes=[mimic]")
     task_id = uuid.uuid4().hex[:12]
     job = Job(task_id, JobSpec(song_id=body.song_id, start=body.start, end=body.end, modes=body.modes,
                                selection=body.selection, seed=body.seed, lyric_query=body.lyric_query,
                                lyric_extent=body.lyric_extent, voice_id=body.voice_id, synthesis_seed=body.synthesis_seed,
-                               with_accompaniment=body.with_accompaniment), owner_id=owner)
+                               with_accompaniment=body.with_accompaniment, audio_only=body.audio_only), owner_id=owner)
     _jobs[task_id] = job
+    job.prefetch(_prefetch_executor)
     _job_futures[task_id] = _executor.submit(job.run)
     return {"task_id": task_id}
 
@@ -181,6 +188,7 @@ def release_score_task(body: TextScoreIn, owner: Owner = LEGACY_OWNER) -> dict:
 def release_task_upload(audio_file: UploadFile = File(...), lrc_file: UploadFile | None = File(None),
                         lrc_text: str = Form(""), start: float | None = Form(None), end: float | None = Form(None),
                         modes: str = Form("mimic,score"), with_accompaniment: bool = Form(False),
+                        audio_only: bool = Form(False),
                         selection: Literal["random", "chorus"] = Form("random"),
                         seed: int | None = Form(None), lyric_query: str | None = Form(None, max_length=MAX_LYRIC_TEXT),
                         voice_id: str = Form(voices.DEFAULT_VOICE),
@@ -189,6 +197,8 @@ def release_task_upload(audio_file: UploadFile = File(...), lrc_file: UploadFile
                         owner: Owner = LEGACY_OWNER) -> dict:
     """Same pipeline for a song the source cannot provide: your own audio + LRC."""
     validate_voice(voice_id)
+    if audio_only and [m for m in modes.split(",") if m] != ["mimic"]:
+        raise HTTPException(422, "audio_only requires modes=mimic")
     lrc = lrc_file.file.read().decode("utf-8-sig", errors="replace") if lrc_file else lrc_text
     if not lrc.strip():
         raise HTTPException(400, "LRC lyrics are required (lrc_file or lrc_text)")
@@ -211,7 +221,8 @@ def release_task_upload(audio_file: UploadFile = File(...), lrc_file: UploadFile
     job = Job(task_id, JobSpec(audio_path=str(audio_path), lrc_path=str(d / "lyrics.lrc"), start=start, end=end,
                                modes=[m for m in modes.split(",") if m], selection=selection, seed=seed,
                                lyric_query=lyric_query, lyric_extent=lyric_extent, voice_id=voice_id,
-                               synthesis_seed=synthesis_seed, with_accompaniment=with_accompaniment), owner_id=owner)
+                               synthesis_seed=synthesis_seed, with_accompaniment=with_accompaniment,
+                               audio_only=audio_only), owner_id=owner)
     _jobs[task_id] = job
     _job_futures[task_id] = _executor.submit(job.run)
     return {"task_id": task_id}
@@ -366,6 +377,7 @@ def delete_task(task_id: str, owner: Owner = LEGACY_OWNER) -> dict:
             shutil.rmtree(uploads)
         if directory.exists():
             shutil.rmtree(directory)
+        cache.purge_owner(owner)
         _jobs.pop(task_id, None)
         _job_futures.pop(task_id, None)
     return {"task_id": task_id, "deleted": True}
@@ -375,7 +387,9 @@ def delete_task(task_id: str, owner: Owner = LEGACY_OWNER) -> dict:
 def runtime() -> dict:
     return {"synthesis": onnx_backend.backend_status(), "workers": tools.worker_status(),
             "alignment": {lang: tools.alignment_backend(lang) for lang in ("zh", "ja", "en")},
-            "note_extraction": {"backend": tools.note_backend(), "game_steps": settings.GAME_STEPS}}
+            "note_extraction": {"backend": tools.note_backend(), "game_steps": settings.GAME_STEPS},
+            "optimization": {"cache": settings.CACHE_ENABLED, "cache_ttl_seconds": settings.CACHE_TTL,
+                             "cache_max_bytes": settings.CACHE_MAX_BYTES, "prefetch": settings.PREFETCH_DOWNLOADS}}
 
 
 @app.get("/search", dependencies=[Depends(auth)])

@@ -222,6 +222,40 @@ test('audio survives polling and completion; elapsed time advances and freezes',
 });
 
 
+test('audio-only option is submitted and has no score controls', { timeout: 30000 }, async () => {
+  const browser = await chromium.launch(launchOptions);
+  try {
+    const page = await browser.newPage();
+    const html = readFileSync(join(__dirname, '../src/dsapi/static/index.html'), 'utf8');
+    let submitted;
+    const state = { task_id: 'fast', status: 'done', spec: { modes: ['mimic'], audio_only: true },
+      timings: { fetch: 0, select: 0, separate: 0, align: 0, notes_f0: 0, build: 0, render_mimic: 1 },
+      outputs: {}, song: { name: 'test' }, alignment: [], jianpu: null };
+    await page.route('http://dsapi.test/**', route => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === '/ui/') return route.fulfill({ contentType: 'text/html', body: html });
+      if (path === '/tasks') return route.fulfill({ json: [] });
+      if (path === '/voices') return route.fulfill({ json: { default_voice_id: 'imported-fixed', voices: [{id:'imported-fixed',name:'用户固定音源',available:true}] } });
+      if (path === '/release_task') {
+        submitted = route.request().postDataJSON();
+        return route.fulfill({ json: { task_id: 'fast' } });
+      }
+      if (path === '/query_result') return route.fulfill({ json: state });
+      return route.fulfill({ status: 404 });
+    });
+    await page.goto('http://dsapi.test/ui/');
+    await page.locator('#songId').fill('1');
+    await page.locator('#mScore').uncheck();
+    await page.locator('#audioOnly').check();
+    await page.locator('#submit').click();
+    await page.locator('#taskSummary h2').waitFor();
+    assert.equal(submitted.audio_only, true);
+    assert.deepEqual(submitted.modes, ['mimic']);
+    assert.equal(await page.locator('#toEditor').count(), 0);
+    assert.equal(await page.locator('.stage').count(), 7);
+  } finally { await browser.close(); }
+});
+
 test('fixed-line score preview, validation and queued submission', { timeout: 30000 }, async () => {
   const browser = await chromium.launch(launchOptions);
   try {

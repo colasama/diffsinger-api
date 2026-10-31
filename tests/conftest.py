@@ -6,6 +6,13 @@ import pytest
 import yaml
 
 
+@pytest.fixture(autouse=True)
+def no_background_downloads(monkeypatch):
+    # Route tests stub inference; they must not launch real network prefetches.
+    from dsapi import settings
+    monkeypatch.setattr(settings, "PREFETCH_DOWNLOADS", False)
+
+
 @pytest.fixture
 def voice_files(tmp_path, monkeypatch):
     from dsapi import settings, voices

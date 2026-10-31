@@ -103,9 +103,10 @@ th { color: var(--muted); font-weight: 500; }
         <label><input type="checkbox" id="mMimic" checked>模仿模式</label>
         <label><input type="checkbox" id="mScore" checked>乐谱模式</label>
         <label><input type="checkbox" id="withAccompaniment">同时生成带原曲伴奏版本</label>
+        <label><input type="checkbox" id="audioOnly">仅模仿音频（更快，不生成简谱）</label>
       </div>
       <div style="margin-top:12px"><button id="submit">提交</button></div>
-      <p class="muted" style="font-size:12px;margin:8px 0 0">先选连续歌词，再按时间戳切片；自动保留中文、英文和日文。同一时间只跑一个任务，其余排队。</p>
+      <p class="muted" style="font-size:12px;margin:8px 0 0">先选连续歌词，再按时间戳切片；自动保留中文、英文和日文。合成依次执行，排队时可提前下载歌曲。</p>
     </section>
     <section>
       <div class="head"><h2>最近任务</h2><button class="ghost" id="refresh">刷新</button></div>
@@ -228,17 +229,24 @@ document.querySelectorAll('input[name="srcMode"]').forEach((r) => r.onchange = (
   $("byUpload").hidden = srcMode() !== "upload";
 });
 
+$("audioOnly").onchange = () => {
+  if ($("audioOnly").checked) { $("mMimic").checked = true; $("mScore").checked = false; }
+};
+$("mScore").onchange = () => { if ($("mScore").checked) $("audioOnly").checked = false; };
+$("mMimic").onchange = () => { if (!$("mMimic").checked) $("audioOnly").checked = false; };
+
 $("submit").onclick = async () => {
   const version = keyVersion;
   const modes = [];
   if ($("mMimic").checked) modes.push("mimic");
   if ($("mScore").checked) modes.push("score");
+  if ($("audioOnly").checked && (modes.length !== 1 || modes[0] !== "mimic")) return alert("仅音频选项需要只勾选模仿模式");
   const s = parseFloat($("start").value), en = parseFloat($("end").value);
   const windowSet = !isNaN(s) && !isNaN(en);
   if (isNaN(s) !== isNaN(en)) return alert("请同时填写开始和结束时间，或都留空");
   let req;
   if (srcMode() === "id") {
-    const body = { with_accompaniment: $("withAccompaniment").checked, song_id: $("songId").value.trim(), modes, selection: $("selection").value, voice_id: $("voice").value, lyric_query: $("lyricQuery").value || null, lyric_extent: $("lyricExtent").value };
+    const body = { audio_only: $("audioOnly").checked, with_accompaniment: $("withAccompaniment").checked, song_id: $("songId").value.trim(), modes, selection: $("selection").value, voice_id: $("voice").value, lyric_query: $("lyricQuery").value || null, lyric_extent: $("lyricExtent").value };
     if (!body.song_id) return alert("请填写歌曲 ID");
     if (windowSet) Object.assign(body, { start: s, end: en });
     req = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
@@ -254,6 +262,7 @@ $("submit").onclick = async () => {
     form.append("lyric_query", $("lyricQuery").value);
     form.append("lyric_extent", $("lyricExtent").value);
     form.append("modes", modes.join(","));
+    form.append("audio_only", String($("audioOnly").checked));
     form.append("with_accompaniment", String($("withAccompaniment").checked));
     form.append("selection", $("selection").value);
     if (windowSet) { form.append("start", s); form.append("end", en); }
@@ -383,7 +392,7 @@ function renderDetail(st) {
     detail.innerHTML = `<div id="taskSummary"></div><div id="taskPlayers" class="players"></div><div id="taskExtras"></div>`;
     detail.dataset.taskId = st.task_id;
   }
-  const wanted = st.spec.score_text != null ? ["parse_score", "render_score"] : STAGES.filter((s) => !s.startsWith("render_") || (st.spec.modes || []).includes(s.slice(7)));
+  const wanted = st.spec.score_text != null ? ["parse_score", "render_score"] : STAGES.filter((s) => !(st.spec.audio_only && s === "quantize") && (!s.startsWith("render_") || (st.spec.modes || []).includes(s.slice(7))));
   const stages = wanted.map((s) => {
     const t = st.timings[s];
     const cls = t !== undefined ? "ok" : (st.stage === s && st.status === "running" ? "cur" : "");

@@ -23,10 +23,22 @@ def test_default_and_explicit_selection_are_persisted(client):
     spec = client.get('/query_result', params={'task_id':task}).json()['spec']
     assert spec['selection'] == 'random' and spec['seed'] is None
     assert spec['with_accompaniment'] is False
+    assert spec['audio_only'] is False
     task = client.post('/release_task', json={'song_id':'1','selection':'chorus','seed':7}).json()['task_id']
     assert api._jobs[task].state.spec.selection == 'chorus'
     assert api._jobs[task].state.spec.seed == 7
     assert client.post('/release_task', json={'song_id':'1','selection':'typo'}).status_code == 422
+
+
+def test_audio_only_requires_mimic_and_is_persisted_on_both_routes(client):
+    assert client.post('/release_task', json={'song_id': '1', 'audio_only': True}).status_code == 422
+    result = client.post('/release_task', json={'song_id': '1', 'modes': ['mimic'], 'audio_only': True})
+    assert result.status_code == 200
+    assert api._jobs[result.json()['task_id']].state.spec.audio_only
+    result = client.post('/release_task_upload', files={'audio_file': ('clip.wav', b'audio', 'audio/wav')},
+                         data={'lrc_text': '[00:01]Hello', 'modes': 'mimic', 'audio_only': 'true'})
+    assert result.status_code == 200
+    assert api._jobs[result.json()['task_id']].state.spec.audio_only
 
 
 def test_upload_supports_reproducible_random_selection(client):

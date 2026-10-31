@@ -5,9 +5,12 @@ the models are integer frame counts that sum to the phrase length.
 """
 
 import json
+from collections.abc import Mapping
+from types import MappingProxyType
 from dataclasses import dataclass
 from functools import cached_property, lru_cache
 import hashlib
+import time
 from pathlib import Path
 
 import numpy as np
@@ -84,6 +87,72 @@ def _models(root: Path):
     return models
 
 
+def _stamp(path: Path):
+    st = path.stat()
+    return st.st_size, st.st_mtime_ns, st.st_ctime_ns
+
+
+@lru_cache(maxsize=32)
+def _read_dictionary(path: Path, stamp, lexicon: Path | None, lexicon_stamp,
+                     known: frozenset, include_entries: bool):
+    entries: dict[str, list[str]] = {}
+    vowels: set[str] = set()
+    grapheme = symbol = None
+    section = None
+    with path.open(encoding="utf8") as stream:
+        for raw in stream:
+            line = raw.strip()
+            if raw.startswith("symbols:"):
+                section = "symbols"
+            elif raw.startswith("entries:"):
+                if not include_entries and section == "symbols":
+                    break
+                section = "entries"
+            elif section == "symbols":
+                if line.startswith("- symbol:"):
+                    symbol = line.split(":", 1)[1].strip()
+                elif line.startswith("type:") and line.split(":", 1)[1].strip() == "vowel":
+                    vowels.add(symbol)
+            elif section == "entries" and include_entries:
+                if line.startswith("- grapheme:"):
+                    # YAML quotes graphemes that would otherwise parse as booleans ('no', 'on').
+                    g = line.split(":", 1)[1].strip().strip("'\"")
+                    grapheme = g if "/" not in g else None
+                    if grapheme is not None:
+                        entries[grapheme] = []
+                elif line.startswith("- ") and grapheme is not None:
+                    entries[grapheme].append(line[2:].strip())
+    if include_entries and lexicon is not None and not entries:
+        # New exports ship symbols/replacements only and expect an external
+        # CMU lexicon. Use the installed aligner's dictionary, validating all
+        # synthesis stages; _r and #r denote the same syllabic-r phone.
+        for raw in lexicon.read_text(encoding="utf-8-sig").splitlines():
+            fields = raw.split()
+            if not fields:
+                continue
+            word, *phones = fields
+            phones = ["en/" + ("#r" if p == "_r" and "en/#r" in known else p) for p in phones]
+            if phones and all(p in known for p in phones):
+                entries.setdefault(word.lower(), phones)
+    return MappingProxyType(entries), frozenset(vowels)
+
+
+class _Dictionaries(Mapping):
+    def __init__(self, bank):
+        self.bank = bank
+
+    def __getitem__(self, language):
+        if language not in LANGS:
+            raise KeyError(language)
+        return self.bank._load_dict(language)[0]
+
+    def __iter__(self):
+        return iter(LANGS)
+
+    def __len__(self):
+        return len(LANGS)
+
+
 class Voicebank:
     def __init__(self, root: Path = settings.VOICEBANK, vocoder: Path = settings.VOCODER,
                  *, speaker: str | None = None, seed: int | None = None):
@@ -91,6 +160,7 @@ class Voicebank:
         self.speaker = speaker
         self.rng = np.random.default_rng(seed)
         self._embeddings = {}
+        self.timings: dict[str, float] = {}
         voc_cfg = yaml.safe_load((vocoder / "vocoder.yaml").read_text())
         self._vocoder_path = vocoder / voc_cfg["model"]
         self._vocoder: OnnxSession | None = None
@@ -102,6 +172,7 @@ class Voicebank:
         frames. Auxiliary tokens/encoders duplicate the primary input, so even
         the unused mixing branch is valid. Noise is explicit in Retake exports.
         """
+        started = time.perf_counter()
         session = model.session(key)
         inputs = {i.name: i for i in session.get_inputs()}
         if "spk_embed" in inputs:
@@ -140,71 +211,33 @@ class Voicebank:
         missing = inputs.keys() - feed.keys()
         if missing:
             raise ValueError(f"Unsupported {key} inputs: {sorted(missing)}")
-        return session.run(None, {k: v for k, v in feed.items() if k in inputs})
+        result = session.run(None, {k: v for k, v in feed.items() if k in inputs})
+        # Some tests/adapters construct a Voicebank without __init__.
+        timings = self.__dict__.setdefault("timings", {})
+        timings[key] = timings.get(key, 0.) + time.perf_counter() - started
+        return result
 
     @cached_property
     def dictionaries(self) -> dict[str, dict[str, list[str]]]:
-        return {lang: self._load_dict(lang)[0] for lang in LANGS}
+        return _Dictionaries(self)
 
     @cached_property
     def vowels(self) -> set[str]:
-        return set().union(*(self._load_dict(lang)[1] for lang in LANGS)) | {"SP", "AP"}
+        return set().union(*(self._load_dict(lang, include_entries=False)[1] for lang in LANGS)) | {"SP", "AP"}
 
     @property
     def dictionary(self) -> tuple[dict[str, list[str]], set[str]]:
         """Mandarin entries and all vowels (kept for callers that predate LANGS)."""
         return self.dictionaries["zh"], self.vowels
 
-    def _load_dict(self, lang: str) -> tuple[dict[str, list[str]], set[str]]:
-        """grapheme -> phonemes, and the vowel phonemes, for one language.
-
-        The YAML is ~1M lines with every language; a line scan is much faster
-        than a full parse and we only need that language's bare graphemes.
-        """
-        cache = self.__dict__.setdefault("_dict_cache", {})
-        if lang in cache:
-            return cache[lang]
+    def _load_dict(self, lang: str, *, include_entries: bool = True):
         path = self.dur.root / f"dsdict-{lang}.yaml"
-        entries: dict[str, list[str]] = {}
-        vowels: set[str] = set()
-        grapheme = symbol = None
-        section = None
-        for raw in path.read_text(encoding="utf8").splitlines():
-            line = raw.strip()
-            if raw.startswith("symbols:"):
-                section = "symbols"
-            elif raw.startswith("entries:"):
-                section = "entries"
-            elif section == "symbols":
-                if line.startswith("- symbol:"):
-                    symbol = line.split(":", 1)[1].strip()
-                elif line.startswith("type:") and line.split(":", 1)[1].strip() == "vowel":
-                    vowels.add(symbol)
-            elif section == "entries":
-                if line.startswith("- grapheme:"):
-                    # YAML quotes graphemes that would otherwise parse as booleans ('no', 'on').
-                    g = line.split(":", 1)[1].strip().strip("'\"")
-                    grapheme = g if "/" not in g else None
-                    if grapheme is not None:
-                        entries[grapheme] = []
-                elif line.startswith("- ") and grapheme is not None:
-                    entries[grapheme].append(line[2:].strip())
-        if lang == "en" and not entries:
-            # New exports ship symbols/replacements only and expect an external
-            # CMU lexicon. Use the installed aligner's dictionary, validating all
-            # synthesis stages; _r and #r denote the same syllabic-r phone.
-            lexicon = settings.HUBERTFA_MODEL.parent / "ds_cmudict-07b.txt"
-            known = set.intersection(*(set(m.phonemes) for m in (self.acoustic, self.dur, self.pitch, self.variance)))
-            for raw in lexicon.read_text(encoding="utf-8-sig").splitlines():
-                fields = raw.split()
-                if not fields:
-                    continue
-                word, *phones = fields
-                phones = ["en/" + ("#r" if p == "_r" and "en/#r" in known else p) for p in phones]
-                if phones and all(p in known for p in phones):
-                    entries.setdefault(word.lower(), phones)
-        cache[lang] = (entries, vowels)
-        return cache[lang]
+        lexicon = settings.HUBERTFA_MODEL.parent / "ds_cmudict-07b.txt" if lang == "en" and include_entries else None
+        known = frozenset.intersection(*(frozenset(m.phonemes) for m in
+                    (self.acoustic, self.dur, self.pitch, self.variance))) if lexicon else frozenset()
+        return _read_dictionary(path.resolve(), _stamp(path), lexicon,
+                                _stamp(lexicon) if lexicon and lexicon.is_file() else None,
+                                known, include_entries)
 
     def g2p(self, grapheme: str, lang: str = "zh") -> list[str]:
         """Pinyin (zh) or a romaji mora unit such as "mo_cl" (ja) -> phonemes."""
@@ -229,7 +262,7 @@ class Voicebank:
             phones = entries.get(grapheme)
         if phones is None:
             raise KeyError(f"'{grapheme}' not in voicebank {lang} dictionary")
-        return phones
+        return list(phones)
 
     def knows(self, grapheme: str, lang: str = "zh") -> bool:
         try:
@@ -301,6 +334,9 @@ class Voicebank:
             "gender": np.full((1, n), gender, np.float32), "velocity": np.ones((1, n), np.float32),
             "depth": np.array(self.acoustic.cfg.get("max_depth", 1.0), np.float32),
             "steps": np.array(steps, np.int64)}, n)[0]
+        started = time.perf_counter()
         if self._vocoder is None:
             self._vocoder = _session(self._vocoder_path)
-        return self._vocoder.run(None, {"mel": mel, "f0": f0[None]})[0][0]
+        wav = self._vocoder.run(None, {"mel": mel, "f0": f0[None]})[0][0]
+        self.timings["vocoder"] = self.timings.get("vocoder", 0.) + time.perf_counter() - started
+        return wav

@@ -15,6 +15,10 @@ if _env.is_file():
 MODELS = ROOT / "models"
 VENDOR = ROOT / "vendor"
 WORK = Path(os.environ.get("DSAPI_WORK", ROOT / "work"))
+CACHE_ENABLED = os.environ.get("DSAPI_CACHE", "1").lower() in ("1", "true", "yes")
+CACHE_TTL = max(0, float(os.environ.get("DSAPI_CACHE_TTL", "86400")))
+CACHE_MAX_BYTES = max(0, int(os.environ.get("DSAPI_CACHE_MAX_BYTES", str(5 * 1024**3))))
+PREFETCH_DOWNLOADS = os.environ.get("DSAPI_PREFETCH", "1").lower() in ("1", "true", "yes")
 
 VOICEBANK = MODELS / "imported-fixed" / "voicebank"
 VOCODER = MODELS / "vocoder"

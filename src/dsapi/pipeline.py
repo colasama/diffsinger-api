@@ -5,10 +5,14 @@ a failed run shows exactly where it stopped.
 """
 
 import json
+import os
 import shutil
 import time
 import traceback
 import secrets
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
+from importlib.metadata import version
 from threading import RLock
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
@@ -16,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import audio, extract, jianpu, lrc, selection, settings, sources, tools, voices
+from . import audio, cache, extract, jianpu, lrc, selection, settings, sources, tools, voices
 from .score import Phrase, render_mimic, render_score
 from .voicebank import Voicebank
 
@@ -38,6 +42,7 @@ class JobSpec:
     voice_id: str = voices.DEFAULT_VOICE
     synthesis_seed: int | None = None
     with_accompaniment: bool = False
+    audio_only: bool = False
     score_text: str | None = None
 
 
@@ -64,6 +69,9 @@ class JobState:
     mixing: dict = field(default_factory=dict)
     voice: dict | None = None
     owner_id: str | None = None
+    submitted_at: float = field(default_factory=lambda: time.time())
+    cache_hits: dict[str, bool] = field(default_factory=dict)
+    metrics: dict[str, float] = field(default_factory=dict)
 
 
 inference_lock = RLock()
@@ -76,6 +84,9 @@ def voicebank(voice_id: str | None = None, seed: int | None = None) -> Voicebank
 
 class Job:
     def __init__(self, task_id: str, spec: JobSpec, *, owner_id: str | None = None):
+        if spec.audio_only and spec.modes != ["mimic"]:
+            raise ValueError("audio_only requires modes=[mimic]")
+        self._source_future: Future | None = None
         self.dir = settings.WORK / task_id
         self.dir.mkdir(parents=True, exist_ok=True)
         if spec.synthesis_seed is None:
@@ -109,6 +120,7 @@ class Job:
         st = self.state
         st.status = "running"
         st.started_at = time.time()
+        st.metrics["queue_seconds"] = max(0., st.started_at - st.submitted_at)
         self.save()
         try:
             with inference_lock:
@@ -121,24 +133,69 @@ class Job:
         self.save()
         return st
 
+    @contextmanager
+    def measure(self, name: str):
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.state.metrics[name] = round(time.perf_counter() - started, 4)
+
+    def prefetch(self, executor):
+        if settings.PREFETCH_DOWNLOADS and self.state.spec.song_id and not self.state.spec.audio_path:
+            self._source_future = executor.submit(self._fetch_source)
+
+    def _fetch_source(self) -> dict:
+        # Prefetch never changes JobState: the inference thread owns progress.
+        started = time.perf_counter()
+        spec, d = self.state.spec, self.dir
+        hit = False
+        if spec.audio_path:
+            src = d / ("source" + Path(spec.audio_path).suffix)
+            shutil.copyfile(spec.audio_path, src)
+            lyrics = Path(spec.lrc_path).read_text(encoding="utf8")
+            song = {"name": Path(spec.audio_path).stem}
+            (d / "lyrics.lrc").write_text(lyrics, encoding="utf8")
+        else:
+            source = sources.get_source()
+            artifacts = cache.ArtifactCache(self.state.owner_id)
+            key = artifacts.key("fetch", {"song_id": spec.song_id,
+                "source": type(source).__module__ + "." + type(source).__qualname__, "config": vars(source)})
+            outputs = {"source.audio": d / "source.audio", "lyrics.lrc": d / "lyrics.lrc", "song.json": d / "song.json"}
+            with artifacts.guard(key):
+                hit = artifacts.restore(key, outputs)
+                if not hit:
+                    with ThreadPoolExecutor(max_workers=2) as fetchers:
+                        info = fetchers.submit(source.song_info, spec.song_id)
+                        lyric = fetchers.submit(source.lyric, spec.song_id)
+                        source.download_audio(spec.song_id, outputs["source.audio"])
+                        song, lyrics = asdict(info.result()), lyric.result()
+                    outputs["song.json"].write_text(json.dumps(song, ensure_ascii=False))
+                    outputs["lyrics.lrc"].write_text(lyrics, encoding="utf8")
+                    # Reject incomplete media before publishing a reusable download.
+                    audio.duration(outputs["source.audio"])
+                    artifacts.store(key, outputs)
+            src = outputs["source.audio"]
+            song = json.loads(outputs["song.json"].read_text())
+            lyrics = outputs["lyrics.lrc"].read_text(encoding="utf8")
+        return {"source": str(src), "song": song, "lyrics": lyrics, "duration": audio.duration(src),
+                "cache_hit": hit, "seconds": round(time.perf_counter() - started, 4)}
+
     def _run(self) -> None:
         st, spec, d = self.state, self.state.spec, self.dir
-        vb = voicebank(spec.voice_id, spec.synthesis_seed)
-
         with self.stage("fetch"):
-            if spec.audio_path:
-                src = d / ("source" + Path(spec.audio_path).suffix)
-                shutil.copy(spec.audio_path, src)
-                lrc_text = Path(spec.lrc_path).read_text(encoding="utf8")
-                st.song = {"name": Path(spec.audio_path).stem}
-            else:
-                source = sources.get_source()
-                st.song = asdict(source.song_info(spec.song_id))
-                src = source.download_audio(spec.song_id, d / "source.audio")
-                lrc_text = source.lyric(spec.song_id)
-            # Not every source reports duration; the file is the ground truth.
-            duration = audio.duration(src)
-            (d / "lyrics.lrc").write_text(lrc_text, encoding="utf8")
+            prepared = self._source_future.result() if self._source_future else self._fetch_source()
+            self._source_future = None
+            src, lrc_text, duration = Path(prepared["source"]), prepared["lyrics"], prepared["duration"]
+            st.song = prepared["song"]
+            st.cache_hits["fetch"] = prepared["cache_hit"]
+            st.metrics["fetch_work_seconds"] = prepared["seconds"]
+        with self.measure("voicebank_seconds"):
+            vb = voicebank(spec.voice_id, spec.synthesis_seed)
+        artifacts = cache.ArtifactCache(st.owner_id)
+        runtime = {"packages": {name: version(name) for name in ("onnxruntime", "torch", "torchaudio", "librosa", "numpy", "scipy", "praat-parselmouth")},
+                   "backend": os.environ.get("DSAPI_ONNX_BACKEND", "auto"),
+                   "device": settings.torch_device()}
 
         with self.stage("select"):
             lines = lrc.parse(lrc_text, duration, trim_gaps=spec.start is None)
@@ -161,7 +218,27 @@ class Job:
             clip = audio.cut(src, d / "clip.wav", start, end)
 
         with self.stage("separate"):
-            lead_path, inst_path = audio.separate_long_vocals(clip, d / "sep")
+            key = artifacts.key("separate", {"audio": cache.digest(clip), "runtime": runtime,
+                "separator": version("audio-separator"), "vocals": settings.VOCALS_MODEL,
+                "karaoke": settings.KARAOKE_MODEL, "protection": settings.KARAOKE_PROTECTION,
+                "compile": settings.SEPARATOR_COMPILE, "sample_rate": settings.SAMPLE_RATE,
+                "models": cache.files([settings.SEPARATOR_MODELS / settings.VOCALS_MODEL,
+                    *([settings.SEPARATOR_MODELS / settings.KARAOKE_MODEL] if settings.KARAOKE_MODEL else []),
+                    *settings.SEPARATOR_MODELS.glob("*.yaml"), *settings.SEPARATOR_MODELS.glob("*.json")])})
+            outputs = {"lead.wav": d / "sep/lead.wav", "instrumental.wav": d / "sep/instrumental.wav",
+                       "separation_meta.json": d / "sep/separation_meta.json"}
+            st.cache_hits["separate"] = artifacts.restore(key, outputs)
+            if not st.cache_hits["separate"]:
+                lead_path, inst_path = audio.separate_long_vocals(clip, d / "sep")
+                reports = []
+                for path in sorted((d / "sep").rglob("lead_protection.json")):
+                    report = json.loads(path.read_text())
+                    reports.append({"chunk": str(path.parent.relative_to(d / "sep")),
+                                    **{k: v for k, v in report.items() if k not in ("original", "separated", "output")}})
+                outputs["separation_meta.json"].write_text(json.dumps(reports))
+                artifacts.store(key, {**outputs, "lead.wav": lead_path, "instrumental.wav": inst_path})
+            else:
+                lead_path, inst_path = outputs["lead.wav"], outputs["instrumental.wav"]
             lead = audio.load(lead_path)
 
         with self.stage("align"):
@@ -169,24 +246,61 @@ class Job:
                                           clip_start=start)
             if not segs:
                 raise RuntimeError("no lyric units the voicebank can sing in this window")
-            sofa = tools.align(d / "segments", d, Path(segs[0]["ckpt"]), Path(segs[0]["dictionary"]),
-                               backend=segs[0]["backend"], lang=segs[0]["lang"])
+            ckpt, dictionary = Path(segs[0]["ckpt"]), Path(segs[0]["dictionary"])
+            key = artifacts.key("align", {"runtime": runtime, "backend": segs[0]["backend"],
+                "language": segs[0]["lang"], "model": cache.files([ckpt.parent]),
+                "dictionary": cache.digest(dictionary),
+                "inputs": {p.name: cache.digest(p) for p in sorted((d / "segments").glob("*"))
+                           if p.suffix in (".wav", ".lab")},
+                "vendor": cache.files((settings.VENDOR / ("HubertFA" if segs[0]["backend"] == "hubertfa" else "SOFA")).rglob("*.py"), content=True)})
+            st.cache_hits["align"] = artifacts.restore(key, {"sofa.json": d / "sofa.json"})
+            if st.cache_hits["align"]:
+                sofa = json.loads((d / "sofa.json").read_text())
+            else:
+                sofa = tools.align(d / "segments", d, ckpt, dictionary,
+                                   backend=segs[0]["backend"], lang=segs[0]["lang"])
+                if not any("error" in value for value in sofa.values()):
+                    artifacts.store(key, {"sofa.json": d / "sofa.json"})
 
         with self.stage("notes_f0"):
             backend = tools.note_backend()
-            if backend == "game-medium":
-                f0, _ = tools.extract_f0(lead_path, d)
-                # Alignment and F0 alone establish phrase/vowel boundaries;
-                # GAME predicts notes conditioned on them, without loading SOME.
-                regions, _ = extract.build_phrases(vb, segs, sofa, [], f0)
-                if not regions:
-                    raise RuntimeError("alignment produced no usable phrases")
-                notes = tools.extract_game_notes(lead_path, d, regions, segs[0]["lang"])
+            if backend == "game-medium" or spec.audio_only:
+                with self.measure("f0_seconds"):
+                    key = artifacts.key("f0", {"audio": cache.digest(lead_path), "runtime": runtime,
+                        "model": cache.files([settings.RMVPE_CKPT]),
+                        "vendor": cache.files([settings.VENDOR / "SOME/modules/rmvpe",
+                                               settings.VENDOR / "SOME/utils/pitch_utils.py"], content=True)})
+                    st.cache_hits["f0"] = artifacts.restore(key, {"f0.npy": d / "f0.npy"})
+                    if st.cache_hits["f0"]:
+                        f0 = np.load(d / "f0.npy")[0]
+                    else:
+                        f0, _ = tools.extract_f0(lead_path, d)
+                        artifacts.store(key, {"f0.npy": d / "f0.npy"})
+                if spec.audio_only:
+                    notes = []
+                    st.note_extraction = {"backend": "skipped", "reason": "audio_only"}
+                else:
+                    with self.measure("game_seconds"):
+                        regions, _ = extract.build_phrases(vb, segs, sofa, [], f0)
+                        if not regions:
+                            raise RuntimeError("alignment produced no usable phrases")
+                        boundaries = [{"phones": p.phones, "syllables": [(x.start, x.end, x.lang) for x in p.syllables]} for p in regions]
+                        key = artifacts.key("game", {"audio": cache.digest(lead_path), "runtime": runtime,
+                            "models": cache.files([settings.GAME_MODEL]), "steps": settings.GAME_STEPS,
+                            "regions": boundaries, "language": segs[0]["lang"]})
+                        game_outputs = {"notes.json": d / "notes.json", "game_regions.json": d / "game_regions.json"}
+                        st.cache_hits["game"] = artifacts.restore(key, game_outputs)
+                        if st.cache_hits["game"]:
+                            notes = json.loads((d / "notes.json").read_text())["notes"]
+                        else:
+                            notes = tools.extract_game_notes(lead_path, d, regions, segs[0]["lang"])
+                            artifacts.store(key, game_outputs)
             else:
                 notes, f0, _ = tools.extract_some_notes_f0(lead_path, d)
-            meta = json.loads((d / "notes.json").read_text())
-            st.note_extraction = {k: v for k, v in meta.items() if k != "notes"}
-            st.note_extraction.setdefault("backend", backend)
+            if not spec.audio_only:
+                meta = json.loads((d / "notes.json").read_text())
+                st.note_extraction = {k: v for k, v in meta.items() if k != "notes"}
+                st.note_extraction.setdefault("backend", backend)
 
         with self.stage("build"):
             phrases, report = extract.build_phrases(vb, segs, sofa, notes, f0)
@@ -196,14 +310,15 @@ class Job:
             if not phrases:
                 raise RuntimeError("alignment produced no usable phrases")
 
-        with self.stage("quantize"):
-            grid = jianpu.estimate_grid(inst_path, phrases)
-            tonic = jianpu.estimate_tonic(phrases)
-            q = jianpu.quantize(phrases, grid)
-            st.grid, st.tonic = asdict(grid), jianpu._NAMES[tonic]
-            st.jianpu = jianpu.render(q, grid, tonic)
-            (d / "jianpu.txt").write_text(st.jianpu, encoding="utf8")
-            (d / "score.json").write_text(json.dumps(_score_json(q, grid), ensure_ascii=False, indent=1))
+        if not spec.audio_only:
+            with self.stage("quantize"):
+                grid = jianpu.estimate_grid(inst_path, phrases)
+                tonic = jianpu.estimate_tonic(phrases)
+                q = jianpu.quantize(phrases, grid)
+                st.grid, st.tonic = asdict(grid), jianpu._NAMES[tonic]
+                st.jianpu = jianpu.render(q, grid, tonic)
+                (d / "jianpu.txt").write_text(st.jianpu, encoding="utf8")
+                (d / "score.json").write_text(json.dumps(_score_json(q, grid), ensure_ascii=False, indent=1))
 
         n = len(lead)
         if "mimic" in spec.modes:
@@ -212,8 +327,11 @@ class Job:
         if "score" in spec.modes:
             with self.stage("render_score"):
                 self._mix("score", ((p, render_score(vb, p)) for p in q), n, inst_path, lead_path)
-        st.outputs["lead"] = str(audio.to_mp3(lead_path, d / "lead.mp3", loudnorm=False))
-        st.outputs["clip"] = str(audio.to_mp3(clip, d / "clip.mp3", loudnorm=False))
+        st.metrics.update({f"synthesis_{key}_seconds": round(value, 4)
+                           for key, value in getattr(vb, "timings", {}).items()})
+        with self.measure("reference_encode_seconds"):
+            st.outputs["lead"] = str(audio.to_mp3(lead_path, d / "lead.mp3", loudnorm=False))
+            st.outputs["clip"] = str(audio.to_mp3(clip, d / "clip.mp3", loudnorm=False))
 
     def _mix(self, kind: str, rendered: Iterable[tuple[Phrase, np.ndarray]], n: int,
              instrumental: Path | None = None, reference: Path | None = None) -> None:

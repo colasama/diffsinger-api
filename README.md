@@ -274,6 +274,38 @@ analysis context for short regions (right zero-padding only when the whole input
 is too short). Returned notes are clipped to the original region's sample-aligned
 start/end, so analysis context cannot lengthen or shift the score.
 
+Repeated jobs reuse downloaded songs, separated stems, alignment, F0 and GAME
+notes from an owner-isolated cache under `work/.cache`. Content hashes identify
+audio/lyrics; model file size/mtime/ctime, relevant parameters, runtime versions
+and pipeline code invalidate analysis entries. Voice and synthesis seed changes
+still run synthesis; voice-specific alignment inputs are checked before reuse.
+Cached artifacts are verified and copied into each job, so deleting an earlier
+job cannot break a later result. Deleting a task also clears that owner's shared
+cache. Invalid entries are recomputed. Model-file changes still require a server
+restart because loaded neural sessions remain resident.
+
+Defaults: `DSAPI_CACHE=1`, `DSAPI_CACHE_TTL=86400` (24 hours),
+`DSAPI_CACHE_MAX_BYTES=5368709120` (5 GiB across owners). Expired entries are not
+reused; expiration and least-recently-used capacity cleanup run on cache writes.
+Set `DSAPI_CACHE=0` to bypass artifact reuse. The first run must populate the
+cache; historical task directories are not automatically imported.
+
+`DSAPI_PREFETCH=1` allows at most two queued song downloads concurrently with
+the single inference worker; metadata and lyrics are fetched alongside audio.
+Repeated concurrent downloads of the same owner's song are coalesced. Uploaded
+files use the normal queue. `job.json`/`query_result` include `cache_hits` and
+`metrics` (queue time, fetch work time, F0, GAME, model and reference encoding
+time). Fetch work can happen while queued; its duration is not added to the
+job's elapsed time a second time. `/runtime` reports optimization settings.
+
+For a faster mimic-only result, send `"modes":["mimic"], "audio_only":true`
+to either task endpoint (multipart uses `modes=mimic`), use the Web UI's
+“仅模仿音频” checkbox, or run `dsapi run SONG_ID --modes mimic --audio-only`.
+This skips GAME and score quantization while preserving aligned phonemes and
+RMVPE + Viterbi F0. It produces mimic/lead/clip audio and optional accompaniment,
+but no `score.json` or jianpu; note extraction is explicitly marked `skipped`.
+The default remains `audio_only=false`, preserving all existing score outputs.
+
 Vocal separation defaults to BS-RoFormer `ep_368`
 (`model_bs_roformer_ep_368_sdr_12.9628.ckpt`), followed by the MelBand karaoke
 model for lead vocal extraction. Override the first model with
