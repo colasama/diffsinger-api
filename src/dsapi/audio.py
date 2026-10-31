@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -35,8 +36,8 @@ def load(path: Path) -> np.ndarray:
     return wav.mean(axis=1)
 
 
-def save(path: Path, wav: np.ndarray) -> Path:
-    sf.write(path, wav, settings.SAMPLE_RATE)
+def save(path: Path, wav: np.ndarray, *, subtype: str = "PCM_16") -> Path:
+    sf.write(path, wav, settings.SAMPLE_RATE, subtype=subtype)
     return path
 
 
@@ -46,6 +47,75 @@ def to_mp3(src: Path, dst: Path, loudnorm: bool = True) -> Path:
         args += ["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"]
     ffmpeg(*args, "-ar", str(settings.SAMPLE_RATE), "-b:a", "192k", str(dst))
     return dst
+
+
+def mix_accompaniment(vocal: Path, instrumental: Path, reference: Path, dst: Path) -> dict:
+    """Mix aligned stems in blocks, matching active vocal RMS with bounded gain.
+
+    The float intermediate cannot clip before final loudness/true-peak control.
+    Normalize the complete mix once so downloadable parts retain its balance.
+    """
+    sr = settings.SAMPLE_RATE
+    block, frame = sr * 10, max(1, sr // 20)
+    info = sf.info(vocal)
+    if info.samplerate != sr or info.channels != 1 or not info.frames:
+        raise ValueError("Mixed vocals must be nonempty mono audio at the synthesis sample rate")
+    n = info.frames
+    with tempfile.TemporaryDirectory(prefix="mix-", dir=dst.parent) as temp:
+        folder = Path(temp)
+        inst_info = sf.info(instrumental)
+        if inst_info.channels not in (1, 2):
+            raise ValueError("Accompaniment must be mono or stereo")
+        if inst_info.samplerate != sr:
+            resampled = folder / "instrumental.wav"
+            ffmpeg("-i", str(instrumental), "-ar", str(sr), "-c:a", "pcm_f32le", str(resampled))
+            instrumental = resampled
+        ref_info = sf.info(reference)
+        if ref_info.samplerate != sr or ref_info.channels != 1 or ref_info.frames != n:
+            raise ValueError("Reference vocals do not share the synthesized vocal timeline")
+        delta = sf.info(instrumental).frames - n
+        if abs(delta) > round(sr * .05):
+            raise ValueError("Accompaniment duration does not match the vocal timeline")
+
+        ref_energy = vocal_energy = 0.
+        active_samples = 0
+        with sf.SoundFile(vocal) as voice, sf.SoundFile(reference) as ref:
+            for start in range(0, n, block):
+                count = min(block, n - start)
+                v, r = voice.read(count, dtype="float64"), ref.read(count, dtype="float64")
+                if not np.isfinite(v).all() or not np.isfinite(r).all():
+                    raise ValueError("Nonfinite vocal samples")
+                for a in range(0, count, frame):
+                    vv, rr = v[a:a+frame], r[a:a+frame]
+                    vp, rp = np.mean(vv * vv), np.mean(rr * rr)
+                    # Ignore silence and separation noise; never amplify a gap.
+                    if rp > 10 ** (-45 / 10) and vp > 10 ** (-60 / 10):
+                        vocal_energy += vp * len(vv)
+                        ref_energy += rp * len(rr)
+                        active_samples += len(vv)
+        if not active_samples:
+            raise ValueError("No overlapping active vocals available for mix balance")
+        gain_db = float(np.clip(10 * np.log10(ref_energy / vocal_energy), -12, 12))
+        gain = 10 ** (gain_db / 20)
+        raw = folder / "mix.wav"
+        with sf.SoundFile(vocal) as voice, sf.SoundFile(instrumental) as inst, \
+                sf.SoundFile(raw, "w", sr, 2, subtype="FLOAT") as output:
+            for start in range(0, n, block):
+                count = min(block, n - start)
+                v = voice.read(count, dtype="float32")
+                bed = inst.read(count, dtype="float32", always_2d=True)
+                if not np.isfinite(bed).all():
+                    raise ValueError("Nonfinite accompaniment samples")
+                if len(bed) < count:
+                    bed = np.pad(bed, ((0, count-len(bed)), (0, 0)))
+                if bed.shape[1] == 1:
+                    bed = np.repeat(bed, 2, axis=1)
+                output.write(bed + (v * gain)[:, None])
+        ffmpeg("-i", str(raw), "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+               "-ar", str(sr), "-c:a", "pcm_f32le", str(dst))
+    return {"vocal_gain_db": gain_db, "active_samples": active_samples,
+            "instrumental_frame_adjustment": -delta, "sample_rate": sr,
+            "target_lufs": -16, "true_peak_db": -1.5}
 
 
 _separators: dict[str, object] = {}

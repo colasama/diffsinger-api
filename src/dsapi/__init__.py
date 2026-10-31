@@ -10,6 +10,7 @@ def main() -> None:
     run.add_argument("--start", type=float)
     run.add_argument("--end", type=float)
     run.add_argument("--modes", default="mimic,score")
+    run.add_argument("--with-accompaniment", action="store_true", help="also mix synthesized vocals with the original instrumental")
     run.add_argument("--task-id")
     run.add_argument("--voice", default="imported-voice-e")
     run.add_argument("--synthesis-seed", type=int)
@@ -32,7 +33,8 @@ def main() -> None:
         st = Job(task_id, JobSpec(song_id=args.song_id, start=args.start, end=args.end,
                                   modes=args.modes.split(","), selection=args.selection, seed=args.seed,
                                   lyric_query=args.lyric_query, lyric_extent=args.lyric_extent,
-                                  voice_id=args.voice, synthesis_seed=args.synthesis_seed)).run()
+                                  voice_id=args.voice, synthesis_seed=args.synthesis_seed,
+                                  with_accompaniment=args.with_accompaniment)).run()
         print(st.jianpu or "")
         print(json.dumps({"status": st.status, "error": st.error, "timings": st.timings,
                           "window": st.window, "alignment": st.alignment, "outputs": st.outputs},

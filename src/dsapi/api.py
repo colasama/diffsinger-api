@@ -104,6 +104,7 @@ class TaskIn(BaseModel):
     start: float | None = None
     end: float | None = None
     modes: list[str] = Field(default_factory=lambda: ["mimic", "score"])
+    with_accompaniment: bool = False
     selection: Literal["random", "chorus"] = "random"
     seed: int | None = None
     lyric_query: str | None = Field(default=None, max_length=MAX_LYRIC_TEXT)
@@ -134,7 +135,8 @@ def release_task(body: TaskIn, owner: Owner = LEGACY_OWNER) -> dict:
     task_id = uuid.uuid4().hex[:12]
     job = Job(task_id, JobSpec(song_id=body.song_id, start=body.start, end=body.end, modes=body.modes,
                                selection=body.selection, seed=body.seed, lyric_query=body.lyric_query,
-                               lyric_extent=body.lyric_extent, voice_id=body.voice_id, synthesis_seed=body.synthesis_seed), owner_id=owner)
+                               lyric_extent=body.lyric_extent, voice_id=body.voice_id, synthesis_seed=body.synthesis_seed,
+                               with_accompaniment=body.with_accompaniment), owner_id=owner)
     _jobs[task_id] = job
     _job_futures[task_id] = _executor.submit(job.run)
     return {"task_id": task_id}
@@ -146,7 +148,7 @@ MAX_UPLOAD = 60 * 1024 * 1024
 @app.post("/release_task_upload", dependencies=[Depends(auth)])
 def release_task_upload(audio_file: UploadFile = File(...), lrc_file: UploadFile | None = File(None),
                         lrc_text: str = Form(""), start: float | None = Form(None), end: float | None = Form(None),
-                        modes: str = Form("mimic,score"),
+                        modes: str = Form("mimic,score"), with_accompaniment: bool = Form(False),
                         selection: Literal["random", "chorus"] = Form("random"),
                         seed: int | None = Form(None), lyric_query: str | None = Form(None, max_length=MAX_LYRIC_TEXT),
                         voice_id: str = Form(voices.DEFAULT_VOICE),
@@ -177,7 +179,7 @@ def release_task_upload(audio_file: UploadFile = File(...), lrc_file: UploadFile
     job = Job(task_id, JobSpec(audio_path=str(audio_path), lrc_path=str(d / "lyrics.lrc"), start=start, end=end,
                                modes=[m for m in modes.split(",") if m], selection=selection, seed=seed,
                                lyric_query=lyric_query, lyric_extent=lyric_extent, voice_id=voice_id,
-                               synthesis_seed=synthesis_seed), owner_id=owner)
+                               synthesis_seed=synthesis_seed, with_accompaniment=with_accompaniment), owner_id=owner)
     _jobs[task_id] = job
     _job_futures[task_id] = _executor.submit(job.run)
     return {"task_id": task_id}

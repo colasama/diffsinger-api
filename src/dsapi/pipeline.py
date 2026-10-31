@@ -37,6 +37,7 @@ class JobSpec:
     lyric_extent: str = "auto"
     voice_id: str = voices.DEFAULT_VOICE
     synthesis_seed: int | None = None
+    with_accompaniment: bool = False
 
 
 @dataclass
@@ -59,6 +60,7 @@ class JobState:
     jianpu: str | None = None
     outputs: dict[str, str] = field(default_factory=dict)
     error: str | None = None
+    mixing: dict = field(default_factory=dict)
     voice: dict | None = None
     owner_id: str | None = None
 
@@ -205,14 +207,15 @@ class Job:
         n = len(lead)
         if "mimic" in spec.modes:
             with self.stage("render_mimic"):
-                self._mix("mimic", ((p, render_mimic(vb, p)) for p in phrases), n)
+                self._mix("mimic", ((p, render_mimic(vb, p)) for p in phrases), n, inst_path, lead_path)
         if "score" in spec.modes:
             with self.stage("render_score"):
-                self._mix("score", ((p, render_score(vb, p)) for p in q), n)
+                self._mix("score", ((p, render_score(vb, p)) for p in q), n, inst_path, lead_path)
         st.outputs["lead"] = str(audio.to_mp3(lead_path, d / "lead.mp3", loudnorm=False))
         st.outputs["clip"] = str(audio.to_mp3(clip, d / "clip.mp3", loudnorm=False))
 
-    def _mix(self, kind: str, rendered: Iterable[tuple[Phrase, np.ndarray]], n: int) -> None:
+    def _mix(self, kind: str, rendered: Iterable[tuple[Phrase, np.ndarray]], n: int,
+             instrumental: Path | None = None, reference: Path | None = None) -> None:
         out = np.zeros(n + settings.SAMPLE_RATE, np.float32)
         boundaries = []
         for p, wav in rendered:
@@ -220,17 +223,29 @@ class Job:
             seg = wav[: len(out) - s]
             out[s:s + len(seg)] += seg
             boundaries.append(min(n, s + len(seg)))
-        wav_path = audio.save(self.dir / f"{kind}.wav", out[:n])
-        mp3 = audio.to_mp3(wav_path, self.dir / f"{kind}.mp3")
+        wav_path = audio.save(self.dir / f"{kind}.wav", out[:n], subtype="FLOAT")
+        self._export_audio(kind, wav_path, n, boundaries)
+        if self.state.spec.with_accompaniment:
+            if instrumental is None or reference is None:
+                raise ValueError("Accompaniment mixing requires both source stems")
+            mixed = self.dir / f"{kind}_mix.wav"
+            self.state.mixing[kind] = audio.mix_accompaniment(wav_path, instrumental, reference, mixed)
+            self._export_audio(kind + "_mix", mixed, n, boundaries, normalized=True)
+
+    def _export_audio(self, kind: str, wav_path: Path, n: int, boundaries: list[int],
+                      *, normalized: bool = False) -> None:
+        mp3 = audio.to_mp3(wav_path, self.dir / f"{kind}.mp3", loudnorm=not normalized)
         self.state.outputs[kind] = str(mp3)
-        # QQ clients can download each bounded part without buffering a whole song.
+        # Mixed parts share the full file's normalization, including instrumental gaps.
         if mp3.stat().st_size > 28 * 1024 * 1024:
             start, i = 0, 0
             while start < n:
                 target = min(n, start + settings.SAMPLE_RATE * 600)
                 stop = max((b for b in boundaries if start < b <= target), default=target) if target < n else n
-                part = audio.save(self.dir / f"{kind}_part_{i:04}.wav", out[start:stop])
-                self.state.outputs[f"{kind}_part_{i:04}"] = str(audio.to_mp3(part, part.with_suffix(".mp3")))
+                part = audio.cut(wav_path, self.dir / f"{kind}_part_{i:04}.wav",
+                                 start / settings.SAMPLE_RATE, stop / settings.SAMPLE_RATE)
+                self.state.outputs[f"{kind}_part_{i:04}"] = str(
+                    audio.to_mp3(part, part.with_suffix(".mp3"), loudnorm=not normalized))
                 part.unlink()
                 start, i = stop, i + 1
 

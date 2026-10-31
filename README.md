@@ -370,3 +370,24 @@ MusicBox API. Upstream failures (including HTTP 502), missing lyrics, or
 unavailable audio fail the task; there is no automatic switch to another source.
 Uploading your own audio + LRC remains available. For `ncm-api` and `meting`,
 configure `DSAPI_SOURCE_URL` with your own instance.
+
+### Accompaniment mixes
+
+`POST /release_task` and multipart `/release_task_upload` accept
+`with_accompaniment` (default `false`). For each selected mode, enabling it retains
+the dry `score` / `mimic` output and adds `score_mix` / `mimic_mix`. Request these
+through `/v1/audio?task_id=…&kind=score_mix` (or `mimic_mix`). CLI runs accept
+`--with-accompaniment`; the Web UI also has a mix checkbox. Existing tasks and
+callers remain dry-only by default. `/render_score` has no source accompaniment
+and retains its current behavior.
+
+Mixing reuses the instrumental stem already separated from the exact source
+clip; it never performs another voice inference. The mono synthesized voice is
+centered over the stereo instrumental. Active 50 ms vocal frames set the voice
+gain relative to the original lead, bounded to ±12 dB; silence is excluded.
+Stems are processed in blocks, sample rates are aligned, and duration mismatches
+over 50 ms fail instead of silently dropping music. The float mix is normalized
+once to -16 LUFS / -1.5 dBTP before MP3 encoding. Long outputs use
+`score_mix_part_0000` / `mimic_mix_part_0000` etc., retaining the complete mix's
+normalization across parts. `job.json.mixing` records gain and frame adjustment.
+Separated accompaniment can retain some original vocal leakage.

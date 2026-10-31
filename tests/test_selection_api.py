@@ -22,6 +22,7 @@ def test_default_and_explicit_selection_are_persisted(client):
     task = client.post('/release_task', json={'song_id':'1'}).json()['task_id']
     spec = client.get('/query_result', params={'task_id':task}).json()['spec']
     assert spec['selection'] == 'random' and spec['seed'] is None
+    assert spec['with_accompaniment'] is False
     task = client.post('/release_task', json={'song_id':'1','selection':'chorus','seed':7}).json()['task_id']
     assert api._jobs[task].state.spec.selection == 'chorus'
     assert api._jobs[task].state.spec.seed == 7
@@ -72,3 +73,14 @@ def test_resolve_route_title_artist_errors_and_auth(client, monkeypatch):
     assert client.get('/resolve_song', params={'q': '不存在'}).status_code == 404
     monkeypatch.setattr(api, 'API_KEY', 'secret')
     assert client.get('/resolve_song', params={'q': '雨爱'}).status_code == 401
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_accompaniment_option_persisted_for_both_routes(client, enabled):
+    response = client.post('/release_task', json={'song_id':'1', 'modes':['score'], 'with_accompaniment':enabled})
+    assert response.status_code == 200
+    assert api._jobs[response.json()['task_id']].state.spec.with_accompaniment is enabled
+    response = client.post('/release_task_upload', files={'audio_file':('clip.wav',b'audio','audio/wav')},
+                           data={'lrc_text':'[00:01]Hello','with_accompaniment':str(enabled).lower()})
+    assert response.status_code == 200
+    assert api._jobs[response.json()['task_id']].state.spec.with_accompaniment is enabled

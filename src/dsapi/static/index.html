@@ -102,6 +102,7 @@ th { color: var(--muted); font-weight: 500; }
       <div class="checks">
         <label><input type="checkbox" id="mMimic" checked>模仿模式</label>
         <label><input type="checkbox" id="mScore" checked>乐谱模式</label>
+        <label><input type="checkbox" id="withAccompaniment">同时生成带原曲伴奏版本</label>
       </div>
       <div style="margin-top:12px"><button id="submit">提交</button></div>
       <p class="muted" style="font-size:12px;margin:8px 0 0">先选连续歌词，再按时间戳切片；自动保留中文、英文和日文。同一时间只跑一个任务，其余排队。</p>
@@ -126,7 +127,7 @@ th { color: var(--muted); font-weight: 500; }
 const STAGES = ["fetch", "select", "separate", "align", "notes_f0", "build", "quantize", "render_mimic", "render_score"];
 const STAGE_NAMES = { fetch: "取歌", select: "选段", separate: "人声分离", notes_f0: "音符/F0", align: "歌词对齐",
   build: "组装", quantize: "量化/简谱", render_mimic: "模仿渲染", render_score: "乐谱渲染" };
-const OUT_NAMES = { clip: "原曲片段", lead: "分离人声", mimic: "模仿模式", score: "乐谱模式" };
+const OUT_NAMES = { clip: "原曲片段", lead: "分离人声", mimic: "模仿模式", score: "乐谱模式", mimic_mix: "模仿模式＋伴奏", score_mix: "乐谱模式＋伴奏" };
 const $ = (id) => document.getElementById(id);
 let current = null, timer = null;
 let elapsedClock = null;
@@ -228,7 +229,7 @@ $("submit").onclick = async () => {
   if (isNaN(s) !== isNaN(en)) return alert("请同时填写开始和结束时间，或都留空");
   let req;
   if (srcMode() === "id") {
-    const body = { song_id: $("songId").value.trim(), modes, selection: $("selection").value, voice_id: $("voice").value, lyric_query: $("lyricQuery").value || null, lyric_extent: $("lyricExtent").value };
+    const body = { with_accompaniment: $("withAccompaniment").checked, song_id: $("songId").value.trim(), modes, selection: $("selection").value, voice_id: $("voice").value, lyric_query: $("lyricQuery").value || null, lyric_extent: $("lyricExtent").value };
     if (!body.song_id) return alert("请填写歌曲 ID");
     if (windowSet) Object.assign(body, { start: s, end: en });
     req = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
@@ -244,6 +245,7 @@ $("submit").onclick = async () => {
     form.append("lyric_query", $("lyricQuery").value);
     form.append("lyric_extent", $("lyricExtent").value);
     form.append("modes", modes.join(","));
+    form.append("with_accompaniment", String($("withAccompaniment").checked));
     form.append("selection", $("selection").value);
     if (windowSet) { form.append("start", s); form.append("end", en); }
     req = { method: "POST", body: form };
