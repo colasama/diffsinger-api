@@ -20,9 +20,9 @@ CACHE_TTL = max(0, float(os.environ.get("DSAPI_CACHE_TTL", "86400")))
 CACHE_MAX_BYTES = max(0, int(os.environ.get("DSAPI_CACHE_MAX_BYTES", str(5 * 1024**3))))
 PREFETCH_DOWNLOADS = os.environ.get("DSAPI_PREFETCH", "1").lower() in ("1", "true", "yes")
 
-VOICEBANK = MODELS / "imported-fixed" / "voicebank"
-VOCODER = MODELS / "vocoder"
-MULTI_VOICE = Path(os.environ.get("DSAPI_MULTI_VOICE", MODELS / "multi_voice" / "version1"))
+VOICEBANK = Path(os.environ.get("DSAPI_VOICEBANK", MODELS / "voicebank")).expanduser()
+VOCODER = Path(os.environ.get("DSAPI_VOCODER", MODELS / "vocoder")).expanduser()
+VOICES_FILE = Path(os.environ["DSAPI_VOICES_FILE"]).expanduser().resolve() if os.environ.get("DSAPI_VOICES_FILE") else None
 SOME_CKPT = MODELS / "some" / "0119_continuous256_5spk" / "model_ckpt_steps_100000_simplified.ckpt"
 NOTE_EXTRACTOR = os.environ.get("DSAPI_NOTE_EXTRACTOR", "game-medium").strip().lower()
 GAME_MODEL = MODELS / "game" / "GAME-1.0.3-medium-onnx"

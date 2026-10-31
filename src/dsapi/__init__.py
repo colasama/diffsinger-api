@@ -13,7 +13,7 @@ def main() -> None:
     run.add_argument("--with-accompaniment", action="store_true", help="also mix synthesized vocals with the original instrumental")
     run.add_argument("--audio-only", action="store_true", help="mimic only: skip note transcription and score output")
     run.add_argument("--task-id")
-    run.add_argument("--voice", default="imported-voice-e")
+    run.add_argument("--voice", help="ID from your imported voice catalog")
     run.add_argument("--synthesis-seed", type=int)
     run.add_argument("--lyric-extent", choices=("auto", "window", "exact"), default="auto")
     run.add_argument("--selection", choices=("random", "chorus"), default="random")
@@ -29,12 +29,13 @@ def main() -> None:
 
     if args.cmd == "run":
         from .pipeline import Job, JobSpec
+        from . import voices
 
         task_id = args.task_id or f"song{args.song_id}"
         st = Job(task_id, JobSpec(song_id=args.song_id, start=args.start, end=args.end,
                                   modes=args.modes.split(","), selection=args.selection, seed=args.seed,
                                   lyric_query=args.lyric_query, lyric_extent=args.lyric_extent,
-                                  voice_id=args.voice, synthesis_seed=args.synthesis_seed,
+                                  voice_id=args.voice or voices.DEFAULT_VOICE, synthesis_seed=args.synthesis_seed,
                                   with_accompaniment=args.with_accompaniment, audio_only=args.audio_only)).run()
         print(st.jianpu or "")
         print(json.dumps({"status": st.status, "error": st.error, "timings": st.timings,

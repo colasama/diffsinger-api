@@ -127,7 +127,7 @@ def validate_voice(voice_id: str) -> None:
     try:
         voice.validate()
     except (OSError, ValueError, KeyError, yaml.YAMLError) as exc:
-        raise HTTPException(503, f"音源 {voice.name} 暂不可用") from exc
+        raise HTTPException(503, f"音源 {voice.name} 暂不可用，请先导入并配置本地音源及兼容的声码器") from exc
 
 
 @app.get("/voices", dependencies=[Depends(auth)])
@@ -247,7 +247,7 @@ def _state(task_id: str, owner: str) -> dict:
         raise HTTPException(404, "unknown task")
     if (state.pop("owner_id", None) or LEGACY_OWNER) != owner:
         raise HTTPException(404, "unknown task")
-    state["voice"] = state.get("voice") or voices.get("imported-fixed").snapshot()
+    state["voice"] = state.get("voice") or dict(voices.LEGACY_VOICE)
     return state
 
 
@@ -262,7 +262,7 @@ def query_result(task_id: str, owner: Owner = LEGACY_OWNER) -> dict:
         if started is not None and (end is not None or st["status"] == "running") else None
     )
     st["outputs"] = {k: f"/v1/audio?task_id={task_id}&kind={k}" for k in st["outputs"]}
-    st["voice"] = st.get("voice") or voices.get("imported-fixed").snapshot()
+    st["voice"] = st.get("voice") or dict(voices.LEGACY_VOICE)
     st["attribution"] = f"AI 合成 · 声库：{st['voice']['name']} · 引擎：DiffSinger"
     ev = settings.WORK / task_id / "eval.json"
     st["evaluation"] = json.loads(ev.read_text()) if ev.is_file() else None

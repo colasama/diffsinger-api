@@ -235,7 +235,7 @@ test('audio-only option is submitted and has no score controls', { timeout: 3000
       const path = new URL(route.request().url()).pathname;
       if (path === '/ui/') return route.fulfill({ contentType: 'text/html', body: html });
       if (path === '/tasks') return route.fulfill({ json: [] });
-      if (path === '/voices') return route.fulfill({ json: { default_voice_id: 'imported-fixed', voices: [{id:'imported-fixed',name:'用户固定音源',available:true}] } });
+      if (path === '/voices') return route.fulfill({ json: { default_voice_id: 'unknown', voices: [{id:'unknown',name:'测试音源',available:true}] } });
       if (path === '/release_task') {
         submitted = route.request().postDataJSON();
         return route.fulfill({ json: { task_id: 'fast' } });
@@ -244,6 +244,7 @@ test('audio-only option is submitted and has no score controls', { timeout: 3000
       return route.fulfill({ status: 404 });
     });
     await page.goto('http://dsapi.test/ui/');
+    await page.locator('input[name=srcMode][value=id]').check();
     await page.locator('#songId').fill('1');
     await page.locator('#mScore').uncheck();
     await page.locator('#audioOnly').check();
@@ -269,17 +270,17 @@ test('fixed-line score preview, validation and queued submission', { timeout: 30
     await page.route('http://dsapi.test/**', route => {
       const url = new URL(route.request().url());
       if (url.pathname === '/ui/') return route.fulfill({contentType:'text/html', body:html});
-      if (url.pathname === '/voices') return route.fulfill({json:{default_voice_id:'imported-voice-e',voices:[{id:'imported-voice-e',name:'用户音源戊',available:true}]}});
+      if (url.pathname === '/voices') return route.fulfill({json:{default_voice_id:'default',voices:[{id:'default',name:'测试音源',available:true}]}});
       if (url.pathname === '/tasks') return route.fulfill({json:submitted ? [state] : []});
       if (url.pathname === '/query_result') return route.fulfill({json:state});
       if (url.pathname === '/parse_score') {
         const body = route.request().postDataJSON();
-        assert.equal(body.voice_id, 'imported-voice-e');
+        assert.equal(body.voice_id, 'default');
         if (body.text === '1 2\n天') return route.fulfill({status:422,json:{detail:{line:2,message:'需要 2 个演唱音节，实际 1 个'}}});
         return route.fulfill({json:{duration_seconds:1.8, rows:[{lyric_line:2,units:[{text:'天',pinyin:'tian'},{text:'晴',pinyin:'qing'}]}]}});
       }
       if (url.pathname === '/release_score_task') {
-        assert.deepEqual(route.request().postDataJSON(), {text:'1 2\n天晴',voice_id:'imported-voice-e'});
+        assert.deepEqual(route.request().postDataJSON(), {text:'1 2\n天晴',voice_id:'default'});
         submitted = true;
         return route.fulfill({json:{task_id:'score-task'}});
       }
@@ -301,9 +302,113 @@ test('fixed-line score preview, validation and queued submission', { timeout: 30
     assert.equal(await page.locator('#taskSummary .stage').count(), 2);
     assert.equal(await page.locator('#evalBtn').count(), 0);
     assert.match(await page.locator('#taskExtras').textContent(), /自填乐谱/);
+    await page.locator('#notationText').fill('1\n改');
+    await page.locator('#toEditor').click();
+    assert.equal(await page.locator('#notationText').inputValue(), '1 2\n天晴');
+    assert.equal(await page.locator('#renderVoice').inputValue(), 'default');
+    assert.equal(await page.locator('#scorePreview').isHidden(), true);
     await page.locator('#apikey').fill('another-key');
     await page.locator('#apikey').dispatchEvent('change');
     assert.equal(await page.locator('#scorePreview').isHidden(), true);
     assert.deepEqual(errors, []);
+  } finally { await browser.close(); }
+});
+
+test('song and lyric lookup supports voice aliases, accompaniment presets and explicit range', {timeout:30000}, async () => {
+  const browser = await chromium.launch(launchOptions);
+  try {
+    const page = await browser.newPage({viewport:{width:390,height:844}});
+    const html = readFileSync(join(__dirname,'../src/dsapi/static/index.html'),'utf8');
+    const errors=[]; page.on('pageerror', e=>errors.push(e.message));
+    let resolved, submitted;
+    const state={task_id:'cover',status:'done',spec:{modes:['mimic']},timings:{},outputs:{},song:{name:'test'}};
+    await page.route('http://dsapi.test/**', route=>{
+      const path=new URL(route.request().url()).pathname;
+      if(path==='/ui/') return route.fulfill({contentType:'text/html',body:html});
+      if(path==='/voices') return route.fulfill({json:{default_voice_id:'first',voices:[
+        {id:'first',name:'测试音源',aliases:['测试','默认'],available:true},
+        {id:'second',name:'另一音源',aliases:['另一'],available:true},
+        {id:'offline',name:'不可用',available:false}]}});
+      if(path==='/tasks') return route.fulfill({json:[]});
+      if(path==='/resolve_song') {
+        resolved=route.request().postDataJSON();
+        return route.fulfill({json:{song:{id:'123'},lyric_query:'第一句\n第二句\n第三句'}});
+      }
+      if(path==='/release_task') {submitted=route.request().postDataJSON();return route.fulfill({json:{task_id:'cover'}});}
+      if(path==='/query_result') return route.fulfill({json:state});
+      return route.fulfill({status:404});
+    });
+    await page.goto('http://dsapi.test/ui/');
+    await page.locator('#voice option[value=second]').waitFor({state:'attached'});
+    assert.equal(await page.locator('#voice').inputValue(),'first');
+    assert.match(await page.locator('#voiceHint').textContent(),/测试.*默认/);
+    assert.equal(await page.locator('#voice option[value=offline]').isDisabled(),true);
+    await page.locator('#voice').selectOption('second');
+    assert.match(await page.locator('#voiceHint').textContent(),/另一/);
+    await page.locator('#songQuery').fill('第一句\n第二句\n第三句');
+    await page.locator('#coverPresets button[data-mode=mimic][data-mix=true]').click();
+    await page.locator('#start').fill('0'); await page.locator('#end').fill('120');
+    await page.locator('#submit').click(); await page.locator('#taskStatus').waitFor();
+    assert.deepEqual(resolved,{q:'第一句\n第二句\n第三句',lyric_extent:'auto'});
+    assert.deepEqual(submitted.modes,['mimic']);
+    assert.equal(submitted.with_accompaniment,true); assert.equal(submitted.voice_id,'second');
+    assert.equal(submitted.start,0); assert.equal(submitted.end,120);
+    assert.equal(submitted.lyric_query,resolved.q); assert.equal(submitted.song_id,'123');
+    await page.locator('#scoreExample').selectOption('slur');
+    await page.locator('#loadScoreExample').click();
+    assert.match(await page.locator('#notationText').inputValue(),/\(2:0.5 3:0.5\)/);
+    assert.match(await page.locator('#notationHint').textContent(),/可省略/);
+    await page.locator('#scoreGuide').evaluate(el=>el.open=true);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+    assert.deepEqual(errors,[]);
+  } finally {await browser.close();}
+});
+
+test('changing account while resolving a song does not submit under the new key', {timeout:30000}, async () => {
+  const browser=await chromium.launch(launchOptions);
+  try {
+    const page=await browser.newPage();
+    const html=readFileSync(join(__dirname,'../src/dsapi/static/index.html'),'utf8');
+    let signal,submitted=0;
+    const stalled=new Promise(resolve=>{signal=resolve;});
+    await page.route('http://dsapi.test/**',route=>{
+      const path=new URL(route.request().url()).pathname;
+      if(path==='/ui/') return route.fulfill({contentType:'text/html',body:html});
+      if(path==='/tasks') return route.fulfill({json:[]});
+      if(path==='/resolve_song') {signal(route);return;}
+      if(path==='/release_task') {submitted++;return route.fulfill({json:{task_id:'wrong-owner'}});}
+      return route.fulfill({status:404});
+    });
+    await page.goto('http://dsapi.test/ui/');
+    await page.locator('#songQuery').fill('晴天 周杰伦');
+    await page.locator('#submit').click(); const pending=await stalled;
+    await page.locator('#apikey').fill('new-owner'); await page.locator('#apikey').dispatchEvent('change');
+    await pending.fulfill({json:{song:{id:'123'}}});
+    await page.waitForFunction(()=>!document.querySelector('#submit').disabled);
+    assert.equal(submitted,0);
+  } finally {await browser.close();}
+});
+
+test('unconfigured installation prompts for a local import without a preset singer', async () => {
+  const browser = await chromium.launch(launchOptions);
+  try {
+    const page = await browser.newPage();
+    const html = readFileSync(join(__dirname, '../src/dsapi/static/index.html'), 'utf8');
+    await page.route('http://dsapi.test/**', route => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === '/ui/') return route.fulfill({ contentType: 'text/html', body: html });
+      if (path === '/voices') return route.fulfill({ json: { default_voice_id: 'default', voices: [
+        { id: 'default', name: '用户导入音源', available: false, aliases: [] }
+      ] } });
+      if (path === '/tasks') return route.fulfill({ json: [] });
+      return route.fulfill({ status: 404 });
+    });
+    await page.goto('http://dsapi.test/ui/');
+    await page.waitForFunction(() => document.querySelector('#voiceHint').textContent.includes('导入'));
+    for (const id of ['voice', 'renderVoice']) {
+      assert.equal(await page.locator('#' + id).inputValue(), '');
+      assert.equal(await page.locator('#' + id + ' option').count(), 1);
+      assert.equal(await page.locator('#' + id + ' option').isDisabled(), true);
+    }
   } finally { await browser.close(); }
 });

@@ -28,7 +28,7 @@ _BASE = {
     "マ": "ma", "ミ": "mi", "ム": "mu", "メ": "me", "モ": "mo",
     "ヤ": "ya", "ユ": "yu", "ヨ": "yo",
     "ラ": "ra", "リ": "ri", "ル": "ru", "レ": "re", "ロ": "ro",
-    "ワ": "wa", "ヰ": "i", "ヱ": "e", "ヲ": "o", "ン": "n", "ヴ": "vu",  # ImportedFixed spells ん as "n"
+    "ワ": "wa", "ヰ": "i", "ヱ": "e", "ヲ": "o", "ン": "n", "ヴ": "vu",  # The phoneme mapping represents ん as "n"
     # small vowels standing alone are sung as plain vowels
     "ァ": "a", "ィ": "i", "ゥ": "u", "ェ": "e", "ォ": "o", "ャ": "ya", "ュ": "yu", "ョ": "yo", "ヮ": "wa",
 }

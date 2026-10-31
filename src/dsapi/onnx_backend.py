@@ -13,7 +13,7 @@ _webgpu_devices = None
 _status_lock = threading.Lock()
 _sessions: dict[str, dict] = {}
 
-# ImportedFixed's diffusion loops pass CPU tensors to these Gather nodes. The native
+# Some exported diffusion loops pass CPU tensors to these Gather nodes. The native
 # WebGPU EP 0.4.0 otherwise fails with "All inputs must be tensors on WebGPU
 # buffers". Keep just these nodes on CPU, not the surrounding neural network.
 _CPU_NODES = "\n".join((

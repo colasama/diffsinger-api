@@ -2,7 +2,7 @@
 
 Measured on 2026-10-31: Apple M1 Pro, 32 GB RAM, Python 3.11,
 ONNX Runtime 1.31.1, native WebGPU plugin 0.4.0, PyTorch 2.15.0.
-The installed voicebank is ImportedFixed v1.0.0 with the compatible vocoder.
+Measurements used locally imported synthesis assets, which are not distributed.
 
 ## Enable native WebGPU
 

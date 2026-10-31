@@ -59,7 +59,7 @@ The integration's regression run passed 55 Python tests, including Japanese
 backend selection, native dictionary routing, closure vocabulary handling,
 unsupported-phoneme rejection, and existing Chinese/English alignment paths.
 
-Audio attribution: AI synthesis · 用户固定音源 · DiffSinger.
+Audio and local synthesis assets are not distributed with this project.
 
 ## Mixed-language integration check
 

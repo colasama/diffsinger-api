@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Download third-party code and weights into vendor/ and models/ (both gitignored).
+# Download analysis tools and weights only (both directories are gitignored).
+# Import your synthesis model and compatible vocoder separately.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p models vendor
@@ -12,8 +13,6 @@ fetch_zip() { # url dest_dir
   [ -d "$2" ] && return
   mkdir -p "$2" && curl -fL -o "$2.zip" "$1" && unzip -q "$2.zip" -d "$2" && rm "$2.zip"
 }
-# Synthesis assets are supplied locally by the operator.
-# Synthesis assets are supplied locally by the operator.
 fetch_zip https://github.com/openvpi/SOME/releases/download/v1.0.0-baseline/0119_continuous128_5spk.zip models/some
 if [ ! -f models/game/GAME-1.0.3-medium-onnx/estimator.onnx ]; then
   mkdir -p models/game

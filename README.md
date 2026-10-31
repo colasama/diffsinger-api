@@ -2,7 +2,7 @@
 
 Re-sing a lyric-selected excerpt with a DiffSinger voicebank: fetch the song,
 randomly pick a continuous LRC window, isolate the lead vocal, align lyrics, transcribe notes,
-then render with a selectable voice (default: Imported Voice E / 用户音源戊). No LLM anywhere in the pipeline.
+then render using a locally imported synthesis model. No LLM anywhere in the pipeline.
 
 ```
 Song id ─▶ audio + LRC ─▶ lyric window + language tags ─▶ crop ─▶ BS-RoFormer + karaoke
@@ -19,33 +19,45 @@ uv sync
 scripts/fetch_models.sh   # includes HubertFA v0.0.7 and GAME Medium v1.0.3
 ```
 
-## Voices and complete lyric excerpts
+## Import local synthesis assets
 
-Install the supplied `version1_MULTI_VOICE` package under `models/multi_voice/version1/`
-(or set `DSAPI_MULTI_VOICE` to its directory). Keep its acoustic, `dsdur`, `dspitch`,
-`dsvariance`, dictionaries and embeddings together. The existing
-`compatible_vocoder` vocoder is shared. Model weights are
-local artifacts and are not committed to Git. The new English export contains
-phoneme definitions only; its word pronunciations use the installed HubertFA
-`ds_cmudict-07b.txt`, with phonemes checked against all synthesis stages.
+No synthesis models, speaker presets or vocoders are included or downloaded by
+this project. Import your own compatible OpenUtau-format DiffSinger ONNX export
+before submitting synthesis jobs. `scripts/fetch_models.sh` installs analysis
+tools and their weights only.
 
-`GET /voices` (same authentication as jobs) lists IDs, names, aliases, availability,
-languages and modes. New jobs default to `imported-voice-e`; missing default
-weights return 503, never silently switch voices. ImportedFixed remains `imported-fixed`.
-`voice_id` is accepted by `/release_task`, `/release_task_upload`, `/render_score`
-and CLI `--voice`. Task records snapshot the selected name/model/speaker;
-legacy records without voice metadata retain ImportedFixed attribution.
+For one model, place its files in `models/voicebank/` or set `DSAPI_VOICEBANK`
+to its directory. Keep the acoustic files, `dsdur`, `dspitch`, `dsvariance` and
+language dictionaries together. Put a compatible vocoder in `models/vocoder/`
+or set `DSAPI_VOCODER`; this directory must contain `vocoder.yaml` and its model.
+The current adapter requires 44.1 kHz audio, a 512-sample hop, all four synthesis
+stages, and `dsdict-zh.yaml`, `dsdict-ja.yaml`, `dsdict-en.yaml` under `dsdur/`.
+The generic API ID is `default`; it remains unavailable until the files validate.
 
-| Voice ID | Name | Aliases used by Gokohime |
-| --- | --- | --- |
-| `imported-fixed` | 用户固定音源 | imported-fixed |
-| `imported-voice-a` | 用户音源甲 | imported-voice-a |
-| `imported-voice-b` | 用户音源乙 | imported-voice-b |
-| `imported-voice-c` | 用户音源丙 | imported-voice-c |
-| `imported-voice-d` | 用户音源丁 | imported-voice-d |
-| `imported-voice-e` | 用户音源戊 | imported-voice-e |
-| `imported-voice-f` | 用户音源己 | imported-voice-f |
-| `imported-voice-g` | 用户音源庚 | imported-voice-g |
+For multiple models or speaker embeddings, create a local JSON file (for example
+`models/voices.json`, ignored by Git) and set `DSAPI_VOICES_FILE` to its path:
+
+```json
+{
+  "default_voice_id": "my-voice",
+  "voices": [
+    {"id": "my-voice", "name": "My imported voice", "path": "./voicebank", "aliases": ["my"]}
+  ]
+}
+```
+
+Paths in this file are relative to the JSON file. Optional `speaker` selects an
+embedding by its suffix in each stage's `speakers` configuration; omit it for a
+fixed-speaker export. Optional `model_version` is your own metadata. Restart after
+changing configuration. Invalid catalog configuration prevents startup.
+
+`GET /voices` lists configured IDs, names, aliases and availability without local
+paths. `voice_id` is accepted by `/release_task`, `/release_task_upload`,
+`/render_score` and CLI `--voice`. Missing model files return 503; unknown IDs
+return 422. Historical jobs without saved voice metadata display an unknown
+source rather than attributing them to a configured model.
+
+## Complete lyric excerpts
 
 `lyric_extent=auto` (default) preserves short-window selection for one or two
 lyric lines. Three or more complete matched LRC lines, or three verified supplied
@@ -78,11 +90,11 @@ embeddings and noise. `synthesis_seed` / `--synthesis-seed` controls that noise 
 is saved separately from the lyric-window `seed`. CPU, CUDA and WebGPU use the
 same adapter; the actual backend is reported by `/runtime`.
 
-Local smoke test (8 voices × score/mimic; writes `work/voice-smoke/`):
+Local smoke test (configured imports × score/mimic; writes `work/voice-smoke/`):
 
 ```sh
 DSAPI_ONNX_BACKEND=cpu uv run python scripts/smoke_voices.py
-uv run dsapi run 3414700455 --voice imported-voice-e --lyric-query '歌词内容'
+uv run dsapi run 3414700455 --voice default --lyric-query '歌词内容'
 ```
 
 ## Run
@@ -346,7 +358,7 @@ durations and pitch expression; mimic retains source phoneme timing and F0.
 Existing task outputs are not rewritten.
 
 Acoustic uses 20 sampling steps, pitch uses 10, and variance uses 20.
-Acoustic depth follows the imported voicebank's `max_depth`.
+Acoustic depth follows the imported model's `max_depth`.
 Duration prediction and the vocoder have no sampling-step setting.
 These defaults apply to both synthesis modes; mimic uses aligned source timing
 and extracted pitch directly, so it skips duration and pitch prediction.
@@ -369,10 +381,6 @@ reported without discarding healthy models; crashed workers restart on their
 next request. `DSAPI_WORKER_TIMEOUT` sets the per-request timeout in seconds
 (default 600). Restart the server to pick up model-file changes or release caches.
 
-## Imported assets
-
-Supply compatible synthesis assets locally and follow their accompanying terms.
-
 ## Web UI (optional)
 
 Off by default. Enable with `uv run dsapi serve --webui`, `DSAPI_WEBUI=1`, or
@@ -380,6 +388,14 @@ Off by default. Enable with `uv run dsapi serve --webui`, `DSAPI_WEBUI=1`, or
 http://127.0.0.1:8765/ui/. It submits tasks, polls progress, plays
 clip / lead / mimic / score side by side, shows the 简谱 and alignment report,
 and can load a task's `score.json` into an editor and re-render it.
+The song composer accepts a song name, lyrics, a song ID, or uploaded audio and LRC.
+Voice selectors show singer aliases; four presets select score/mimic vocals with
+or without accompaniment. Explicit time ranges and three or more complete lyric
+lines can exceed the normal short-clip limit.
+The custom-score composer includes fixed alternating notation/lyric lines,
+loadable examples, an expandable syntax guide, and validation before submission.
+Bar lines are optional. Completed custom-score tasks can restore their original
+text to the composer for editing. Both composers use a muted rose theme.
 The task list's delete button removes a completed or failed task, including its
 audio, score, logs and uploaded files, after confirmation. Queued and running
 tasks cannot be deleted. The same operation is available through authenticated
@@ -442,12 +458,12 @@ Separated accompaniment can retain some original vocal leakage.
 Gokohime 输入 `.score` 会发送一张谱子格式说明图片，包含演唱示例和符号说明。最简输入：
 
 ```text
-.score 戊
+.score
 1 2 3 5
 今天天晴
 ```
 
-命令首行只填写可选歌手，支持 `.voices` 中的别名；省略歌手时用用户音源戊。
+命令首行只填写可选歌手，支持 `.voices` 中的别名；省略歌手时使用用户配置的默认音源。
 未知歌手会报错，不会将乐谱作为歌曲搜索。后续非空行严格交替为简谱、歌词，
 无需“谱/词”前缀。可以连续追加多对行；换行不额外增加停顿。
 
@@ -467,7 +483,7 @@ Gokohime 输入 `.score` 会发送一张谱子格式说明图片，包含演唱�
 示例（每小节四拍）：
 
 ```text
-.score 心
+.score
 1=C4 BPM=100 4/4
 1 (2:0.5 3:0.5) 5 0 | 6:2 5:2
 晴 天 好 | 向 前
@@ -478,10 +494,10 @@ Gokohime 输入 `.score` 会发送一张谱子格式说明图片，包含演唱�
 单字及其连音最多 60 秒，单音时值为 0.0625–64 拍，BPM 为 20–400。
 自填乐谱生成干声，不提供原唱对比或原曲伴奏。
 
-API 两个入口都接收 `{"text":"1 2 3 5\n今天天晴","voice_id":"imported-voice-e"}`：
+API 两个入口都接收 `{"text":"1 2 3 5\n今天天晴","voice_id":"default"}`：
 
 - `POST /parse_score`：返回 `phrases`、`rows`（歌词拆分）、`duration_seconds` 和节拍参数；不会创建任务。
 - `POST /release_score_task`：服务端重新校验并返回 `task_id`；支持可选 `synthesis_seed`，共用现有队列、鉴权、查询、音频下载及删除接口。
 
 格式错误返回 HTTP 422，`detail` 包含 `line`、`column`、`message`；行号从内容第一行开始，不含 `.score` 命令行。
-现有 `/render_score` JSON 接口继续保留；网页“乐谱合成”提供固定行输入和可展开的 JSON 编辑器。
+现有 `/render_score` JSON 接口继续保留；网页“自填乐谱”提供固定行输入和可展开的 JSON 编辑器。

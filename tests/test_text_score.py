@@ -125,7 +125,7 @@ def test_preview_validation_and_ownership(client, monkeypatch):
     task = client.post('/release_score_task', json={'text': '1\n天', 'synthesis_seed': 7}).json()['task_id']
     st = client.get('/query_result', params={'task_id': task}).json()
     assert st['spec']['modes'] == ['score']
-    assert st['spec']['voice_id'] == 'imported-voice-e'
+    assert st['spec']['voice_id'] == 'default'
     assert st['spec']['score_text'] == '1\n天'
     assert st['spec']['synthesis_seed'] == 7
     assert 'owner_id' not in st

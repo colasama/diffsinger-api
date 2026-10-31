@@ -29,7 +29,7 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
         base = f"http://{self.headers['Host']}"
-        song = {"id": 42, "name": "别把夏天关掉", "ar": [{"name": "乐小君"}, {"name": "用户音源戊"}], "dt": 200591}
+        song = {"id": 42, "name": "别把夏天关掉", "ar": [{"name": "乐小君"}, {"name": "测试音源"}], "dt": 200591}
         # MusicBox requires its site headers, including on media requests.
         if u.path.startswith("/musicbox/"):
             if (self.headers.get("Referer") != "https://mu-jie.cc/"
@@ -46,12 +46,12 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send({"error": "unavailable"})
                 if q["keywords"] == "empty":
                     return self._send([])
-                return self._send([{"id": "42", "name": song["name"], "artist": "乐小君/用户音源戊"}])
+                return self._send([{"id": "42", "name": song["name"], "artist": "乐小君/测试音源"}])
             if u.path == "/musicbox/meting/":
                 if q["id"] == "missing" and q["type"] == "song":
                     return self._send([])
                 if q["type"] == "song":
-                    return self._send([{"id": "42", "name": song["name"], "artist": "乐小君/用户音源戊"}])
+                    return self._send([{"id": "42", "name": song["name"], "artist": "乐小君/测试音源"}])
                 if q["type"] == "lrc":
                     return self._send(LRC if q["id"] != "missing" else "", "text/plain")
                 if q["type"] == "url":
@@ -70,7 +70,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send({"code": 200, "data": [{"id": 42, "url": base + "/media.mp3", "freeTrialInfo": None}]})
         # meting
         if u.path == "/meting/":
-            item = {"name": "别把夏天关掉", "artist": "乐小君 / 用户音源戊",
+            item = {"name": "别把夏天关掉", "artist": "乐小君 / 测试音源",
                     "url": f"{base}/meting/?server={q['server']}&type=url&id=42",
                     "lrc": f"{base}/meting/?server={q['server']}&type=lrc&id=42"}
             if q["type"] in ("search", "song"):
@@ -100,7 +100,7 @@ def test_source_roundtrip(server, make, tmp_path):
     src = make(server)
     hits = src.search("夏天")
     assert hits[0].id == "42" and hits[0].name == "别把夏天关掉"
-    assert hits[0].artists == ["乐小君", "用户音源戊"]
+    assert hits[0].artists == ["乐小君", "测试音源"]
     assert src.song_info("42").name == "别把夏天关掉"
     assert src.lyric("42") == LRC
     assert src.download_audio("42", tmp_path / "a").read_bytes() == b"ID3fake"

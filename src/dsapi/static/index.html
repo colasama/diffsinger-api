@@ -6,13 +6,13 @@
 <title>dsapi</title>
 <style>
 :root {
-  --bg: #f6f6f4; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e3de;
-  --accent: #c2410c; --accent-soft: #fdeee6; --ok: #15803d; --bad: #b91c1c; --run: #1d4ed8;
+  --bg: #faf6f8; --panel: #ffffff; --text: #382e36; --muted: #6d5a66; --line: #e8d8df;
+  --accent: #a94d73; --accent-soft: #f4e6ed; --ok: #15803d; --bad: #b91c1c; --run: #1d4ed8;
   --mono: ui-monospace, "SF Mono", Menlo, monospace;
 }
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #161615; --panel: #1f1f1e; --text: #ecece8; --muted: #9a9a93; --line: #33332f;
-          --accent: #fb923c; --accent-soft: #3a2416; --ok: #4ade80; --bad: #f87171; --run: #93c5fd; }
+  :root { --bg: #201a1e; --panel: #2a2228; --text: #f0e6ec; --muted: #c1a9b7; --line: #493742;
+          --accent: #cb789a; --accent-soft: #442b38; --ok: #4ade80; --bad: #f87171; --run: #93c5fd; }
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "PingFang SC", sans-serif; }
@@ -29,7 +29,7 @@ input, textarea, select { width: 100%; padding: 7px 9px; border: 1px solid var(-
 textarea { font-family: var(--mono); font-size: 12px; min-height: 220px; resize: vertical; }
 .row { display: flex; gap: 8px; }
 .row > * { flex: 1; min-width: 0; }
-.checks { display: flex; gap: 14px; margin-top: 8px; }
+.checks { display: flex; flex-wrap: wrap; gap: 10px 14px; margin-top: 8px; }
 .checks label { display: flex; gap: 5px; align-items: center; margin: 0; color: var(--text); font-size: 13px; }
 .checks input { width: auto; }
 button { padding: 7px 14px; border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 6px; font: inherit; cursor: pointer; }
@@ -58,27 +58,46 @@ th { color: var(--muted); font-weight: 500; }
 .muted { color: var(--muted); }
 .head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
 .head h2 { margin: 0; }
+.shortcuts { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.shortcuts button { padding: 5px 9px; font-size: 12px; }
+.shortcuts button[aria-pressed="true"] { background: var(--accent-soft); }
+.quick-nav { display: flex; gap: 14px; }
+a { color: var(--accent); }
+summary { cursor: pointer; color: var(--accent); }
+.guide { margin: 12px 0; }
+.guide table { margin-top: 8px; }
+.guide code { font-family: var(--mono); white-space: nowrap; }
+.voice-hint { margin: 5px 0 12px; font-size: 12px; color: var(--muted); }
+#scorePreview { white-space: pre-wrap; margin-top: 12px; }
+section { scroll-margin-top: 16px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 </style>
 </head>
 <body>
 <header>
   <h1>dsapi</h1>
   <span class="attr">AI 合成 · 引擎：DiffSinger</span>
+  <nav class="quick-nav" aria-label="创作入口"><a href="#coverComposer">歌曲翻唱</a><a href="#scoreComposer">自填乐谱</a></nav>
   <span class="attr" id="runtime" role="status">合成后端：读取中…</span>
   <span class="key">API key <input id="apikey" type="password" style="width:140px" placeholder="未设置可留空"></span>
 </header>
 <main>
   <div>
-    <section>
-      <h2>新任务</h2>
+    <section id="coverComposer">
+      <h2>歌曲翻唱</h2>
       <label>搜索歌曲</label>
-      <div class="row"><input id="q" placeholder="歌名 / 歌手"><button class="ghost" id="searchBtn" style="flex:0">搜索</button></div>
+      <div class="row"><input id="q" placeholder="歌名 / 歌手"><button class="ghost" id="searchBtn" style="flex:0 0 auto">搜索</button></div>
       <ul class="list" id="results"></ul>
       <div class="checks" style="margin-top:10px">
-        <label><input type="radio" name="srcMode" value="id" checked>歌曲 ID</label>
+        <label><input type="radio" name="srcMode" value="query" checked>歌名 / 歌词</label>
+        <label><input type="radio" name="srcMode" value="id">歌曲 ID</label>
         <label><input type="radio" name="srcMode" value="upload">上传音频 + LRC</label>
       </div>
-      <div id="byId">
+      <div id="byQuery">
+        <label for="songQuery">歌名＋原唱，或完整歌词</label>
+        <textarea id="songQuery" maxlength="16384" style="min-height:100px" placeholder="晴天 周杰伦&#10;也可粘贴多行歌词"></textarea>
+      </div>
+      <div id="byId" hidden>
         <label>歌曲 ID</label>
         <input id="songId" placeholder="3414700455">
       </div>
@@ -93,12 +112,20 @@ th { color: var(--muted); font-weight: 500; }
         <div><label>开始（秒，可选）</label><input id="start" inputmode="decimal"></div>
         <div><label>结束（秒，可选）</label><input id="end" inputmode="decimal"></div>
       </div>
-      <label for="voice">音源</label><select id="voice"><option value="imported-voice-e">用户音源戊</option></select>
+      <p class="voice-hint">指定秒数范围或三句及以上完整歌词，不受短片段长度限制。</p>
+      <label for="voice">音源</label><select id="voice"><option value="" disabled selected>请先导入音源</option></select>
+      <p class="voice-hint" id="voiceHint"></p>
       <label for="lyricQuery">指定歌词（可多行，三句及以上完整选段）</label>
       <textarea id="lyricQuery" style="min-height:80px" maxlength="16384"></textarea>
       <label for="lyricExtent">歌词范围</label><select id="lyricExtent"><option value="auto">自动判断</option><option value="exact">完整指定歌词</option><option value="window">短片段</option></select>
       <label for="selection">自动选段（未填写时间时）</label>
       <select id="selection"><option value="random">随机选择连续歌词</option><option value="chorus">选择评分最高的连续歌词</option></select>
+      <div class="shortcuts" id="coverPresets" aria-label="翻唱模式">
+        <button class="ghost" data-mode="score" data-mix="false" type="button">乐谱干声</button>
+        <button class="ghost" data-mode="mimic" data-mix="false" type="button">模仿干声</button>
+        <button class="ghost" data-mode="score" data-mix="true" type="button">乐谱＋伴奏</button>
+        <button class="ghost" data-mode="mimic" data-mix="true" type="button">模仿＋伴奏</button>
+      </div>
       <div class="checks">
         <label><input type="checkbox" id="mMimic" checked>模仿模式</label>
         <label><input type="checkbox" id="mScore" checked>乐谱模式</label>
@@ -115,15 +142,35 @@ th { color: var(--muted); font-weight: 500; }
   </div>
   <div>
     <section id="detail"><p class="muted">选择或提交一个任务。</p></section>
-    <section>
-      <div class="head"><h2>乐谱合成</h2></div>
+    <section id="scoreComposer">
+      <div class="head"><h2>自填乐谱</h2><span class="muted">干声合成</span></div>
       <label for="renderVoice">音源</label><select id="renderVoice"></select>
+      <p class="voice-hint" id="renderVoiceHint"></p>
+      <div class="row">
+        <select id="scoreExample" aria-label="乐谱示例"><option value="basic">基础示例</option><option value="slur">连音与休止</option><option value="bars">带小节线</option><option value="ja">日文</option><option value="en">英文</option></select>
+        <button class="ghost" id="loadScoreExample" type="button" style="flex:0 0 auto">填入示例</button>
+      </div>
       <label for="notationText">一行简谱，一行歌词</label>
-      <textarea id="notationText" spellcheck="false" style="min-height:120px">1 2 3 5
+      <textarea id="notationText" maxlength="16384" spellcheck="false" aria-describedby="notationHint" style="min-height:160px">1 2 3 5
 今天天晴</textarea>
-      <p class="muted" style="font-size:12px">可选首行：1=C4 BPM=120 4/4 LANG=zh；0 休止，5:2 两拍，(2 3) 一字多音。</p>
+      <p class="voice-hint" id="notationHint">小节线 | 可省略，只有使用时才校验每小节拍数。支持连续填写多组谱词。</p>
+      <details class="guide" id="scoreGuide"><summary>谱子格式与可选参数</summary>
+        <table><thead><tr><th>写法</th><th>含义</th></tr></thead><tbody>
+          <tr><td><code>1 2 3 4 5 6 7</code></td><td>音阶，每音默认一拍，以空格分隔。</td></tr>
+          <tr><td><code>0 / 0:2</code></td><td>休止一拍 / 两拍，不占歌词；纯休止行的歌词填 -。</td></tr>
+          <tr><td><code>1' / 1,</code></td><td>高 / 低一个八度，使用英文符号。</td></tr>
+          <tr><td><code>#4 / b7</code></td><td>升 / 降半音。</td></tr>
+          <tr><td><code>5:2 / 3:0.5 / 3:1.5</code></td><td>两拍 / 半拍 / 一拍半，一拍始终为四分音符。</td></tr>
+          <tr><td><code>(2:0.5 3:0.5)</code></td><td>一字多音，括号中不能有休止符。</td></tr>
+          <tr><td><code>|</code>（可省略）</td><td>使用时才校验小节拍数，歌词可对应分节。</td></tr>
+          <tr><td><code>行(xing)</code></td><td>指定中文读音，不带声调。</td></tr>
+          <tr><td><code>1=C4 BPM=120 4/4</code></td><td>可选首行：调号、速度、拍号；这里是默认值。</td></tr>
+          <tr><td><code>LANG=zh / ja / en</code></td><td>语言参数，如 LANG=ja；默认中文，日文按音拍、英文按词典音节。</td></tr>
+        </tbody></table>
+        <p class="voice-hint">空行、一般标点忽略；换行不增加停顿。最长 30 分钟，16384 字符；不受 32 秒选段限制。</p>
+      </details>
       <button class="ghost" id="parseScoreBtn">检查谱词</button> <button id="submitScoreBtn">提交乐谱</button>
-      <pre id="scorePreview" hidden></pre>
+      <pre id="scorePreview" role="status" aria-live="polite" hidden></pre>
       <details id="jsonEditor" style="margin-top:12px"><summary>高级：编辑 score.json</summary>
       <p class="muted" style="font-size:12px">时间单位为秒，midi 为音高。</p>
       <textarea id="scoreText" spellcheck="false"></textarea>
@@ -144,6 +191,7 @@ let elapsedClock = null;
 const deleting = new Set();
 let taskListVersion = 0;
 let keyVersion = 0;
+let voiceCatalog = null;
 
 const keyStore = { get() { try { return localStorage.getItem("dsapi.key") || ""; } catch { return ""; } },
                    set(v) { try { localStorage.setItem("dsapi.key", v); } catch {} } };
@@ -151,6 +199,8 @@ $("apikey").value = keyStore.get();
 $("apikey").addEventListener("change", (e) => {
   keyStore.set(e.target.value);
   ++keyVersion;
+  voiceCatalog = null;
+  updateVoiceHints();
   current = null;
   clearTimeout(timer);
   elapsedClock = null;
@@ -180,6 +230,7 @@ async function loadVoices() {
   try {
     const catalog = await (await api("/voices")).json();
     if (version !== keyVersion) return;
+    voiceCatalog = catalog;
     for (const id of ["voice", "renderVoice"]) {
       const select = $(id), previous = select.value;
       select.replaceChildren(...catalog.voices.map(v => {
@@ -188,9 +239,20 @@ async function loadVoices() {
         option.disabled = !v.available;
         return option;
       }));
-      select.value = previous || catalog.default_voice_id;
+      const available = catalog.voices.filter(v => v.available);
+      select.value = available.some(v => v.id === previous) ? previous
+        : available.find(v => v.id === catalog.default_voice_id)?.id || available[0]?.id || "";
+      if (id === "renderVoice" && select.value !== previous) clearScorePreview();
     }
+    updateVoiceHints();
   } catch (e) { console.error("音源列表加载失败", e); }
+}
+
+function updateVoiceHints() {
+  for (const [id, hint] of [["voice", "voiceHint"], ["renderVoice", "renderVoiceHint"]]) {
+    const chosen = voiceCatalog?.voices.find(v => v.id === $(id).value);
+    $(hint).textContent = chosen ? `别名：${(chosen.aliases || []).join(" / ") || chosen.name}` : "请先在服务端导入并配置本地音源";
+  }
 }
 
 async function loadRuntime() {
@@ -221,10 +283,18 @@ $("searchBtn").onclick = async () => {
   } catch (e) { $("results").innerHTML = `<li class="err">${esc(e.message)}</li>`; }
 };
 $("q").addEventListener("keydown", (e) => { if (e.key === "Enter") $("searchBtn").click(); });
-$("results").onclick = (e) => { const li = e.target.closest("li[data-id]"); if (li) $("songId").value = li.dataset.id; };
+$("results").onclick = (e) => {
+  const li = e.target.closest("li[data-id]");
+  if (li) {
+    $("songId").value = li.dataset.id;
+    const radio = document.querySelector('input[name="srcMode"][value="id"]');
+    radio.checked = true; radio.dispatchEvent(new Event("change"));
+  }
+};
 
 const srcMode = () => document.querySelector('input[name="srcMode"]:checked').value;
 document.querySelectorAll('input[name="srcMode"]').forEach((r) => r.onchange = () => {
+  $("byQuery").hidden = srcMode() !== "query";
   $("byId").hidden = srcMode() !== "id";
   $("byUpload").hidden = srcMode() !== "upload";
 });
@@ -235,47 +305,74 @@ $("audioOnly").onchange = () => {
 $("mScore").onchange = () => { if ($("mScore").checked) $("audioOnly").checked = false; };
 $("mMimic").onchange = () => { if (!$("mMimic").checked) $("audioOnly").checked = false; };
 
+function updateCoverPreset() {
+  for (const button of document.querySelectorAll("#coverPresets button")) {
+    const score = button.dataset.mode === "score";
+    const selected = $("mScore").checked === score && $("mMimic").checked !== score
+      && $("withAccompaniment").checked === (button.dataset.mix === "true");
+    button.setAttribute("aria-pressed", String(selected));
+  }
+}
+$("coverPresets").onclick = e => {
+  const button = e.target.closest("button[data-mode]");
+  if (!button) return;
+  $("mScore").checked = button.dataset.mode === "score";
+  $("mMimic").checked = button.dataset.mode === "mimic";
+  $("withAccompaniment").checked = button.dataset.mix === "true";
+  $("audioOnly").checked = false;
+  updateCoverPreset();
+};
+for (const id of ["mScore", "mMimic", "withAccompaniment", "audioOnly"]) $(id).addEventListener("change", updateCoverPreset);
+for (const id of ["voice", "renderVoice"]) $(id).addEventListener("change", updateVoiceHints);
+updateCoverPreset();
+
 $("submit").onclick = async () => {
-  const version = keyVersion;
+  const version = keyVersion, source = srcMode();
   const modes = [];
   if ($("mMimic").checked) modes.push("mimic");
   if ($("mScore").checked) modes.push("score");
+  if (!modes.length) return alert("请至少选择一种翻唱模式");
   if ($("audioOnly").checked && (modes.length !== 1 || modes[0] !== "mimic")) return alert("仅音频选项需要只勾选模仿模式");
-  const s = parseFloat($("start").value), en = parseFloat($("end").value);
-  const windowSet = !isNaN(s) && !isNaN(en);
-  if (isNaN(s) !== isNaN(en)) return alert("请同时填写开始和结束时间，或都留空");
-  let req;
-  if (srcMode() === "id") {
-    const body = { audio_only: $("audioOnly").checked, with_accompaniment: $("withAccompaniment").checked, song_id: $("songId").value.trim(), modes, selection: $("selection").value, voice_id: $("voice").value, lyric_query: $("lyricQuery").value || null, lyric_extent: $("lyricExtent").value };
-    if (!body.song_id) return alert("请填写歌曲 ID");
-    if (windowSet) Object.assign(body, { start: s, end: en });
-    req = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
-  } else {
-    const audio = $("audioFile").files[0];
+  const start = $("start").value.trim(), end = $("end").value.trim();
+  const windowSet = start !== "" || end !== "";
+  if (windowSet && (!start || !end || !Number.isFinite(Number(start)) || !Number.isFinite(Number(end)) || Number(start) < 0 || Number(end) <= Number(start))) {
+    return alert("请填写有效的起止秒数，满足 0 ≤ 开始 < 结束，或同时留空");
+  }
+  const body = { audio_only: $("audioOnly").checked, with_accompaniment: $("withAccompaniment").checked,
+    modes, selection: $("selection").value, voice_id: $("voice").value,
+    lyric_query: $("lyricQuery").value || null, lyric_extent: $("lyricExtent").value };
+  if (windowSet) Object.assign(body, {start: Number(start), end: Number(end)});
+  const query = $("songQuery").value.trim();
+  const songId = $("songId").value.trim();
+  if (source === "query" && !query) return alert("请填写歌名或歌词");
+  if (source === "id" && !songId) return alert("请填写歌曲 ID");
+  let form;
+  if (source === "upload") {
+    const audio = $("audioFile").files[0], lrc = $("lrcFile").files[0], lyrics = $("lrcText").value;
     if (!audio) return alert("请选择音频文件");
-    if (!$("lrcFile").files[0] && !$("lrcText").value.trim()) return alert("请提供 LRC 歌词");
-    const form = new FormData();
+    if (!lrc && !lyrics.trim()) return alert("请提供 LRC 歌词");
+    form = new FormData();
     form.append("audio_file", audio);
-    if ($("lrcFile").files[0]) form.append("lrc_file", $("lrcFile").files[0]);
-    else form.append("lrc_text", $("lrcText").value);
-    form.append("voice_id", $("voice").value);
-    form.append("lyric_query", $("lyricQuery").value);
-    form.append("lyric_extent", $("lyricExtent").value);
-    form.append("modes", modes.join(","));
-    form.append("audio_only", String($("audioOnly").checked));
-    form.append("with_accompaniment", String($("withAccompaniment").checked));
-    form.append("selection", $("selection").value);
-    if (windowSet) { form.append("start", s); form.append("end", en); }
-    req = { method: "POST", body: form };
+    if (lrc) form.append("lrc_file", lrc); else form.append("lrc_text", lyrics);
+    for (const [key, value] of Object.entries(body)) {
+      form.append(key, key === "modes" ? value.join(",") : value ?? "");
+    }
   }
   $("submit").disabled = true;
   try {
-    const path = srcMode() === "id" ? "/release_task" : "/release_task_upload";
-    const { task_id } = await (await api(path, req)).json();
+    if (source === "query") {
+      const resolved = await (await api("/resolve_song", {method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({q: query, lyric_extent: body.lyric_extent})})).json();
+      if (version !== keyVersion) return;
+      if (!resolved.song?.id) throw new Error("没有找到对应歌曲");
+      body.song_id = String(resolved.song.id);
+      body.lyric_query ||= resolved.lyric_query || null;
+    } else if (source === "id") body.song_id = songId;
+    const req = form ? {method: "POST", body: form} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)};
+    const {task_id} = await (await api(form ? "/release_task_upload" : "/release_task", req)).json();
     if (version !== keyVersion) return;
     await loadTasks();
-    if (version !== keyVersion) return;
-    select(task_id);
+    if (version === keyVersion) select(task_id);
   } catch (e) { if (version === keyVersion) alert(e.message); }
   finally { $("submit").disabled = false; }
 };
@@ -429,22 +526,23 @@ function renderDetail(st) {
   };
   const btn = $("toEditor");
   if (btn) btn.onclick = async () => {
-    try { function evalBlock(st) {
-  const ev = st.evaluation;
-  const pct = (v) => v == null ? "–" : (v * 100).toFixed(1) + "%";
-  const rows = !ev ? "" : [
-    ev.mimic_pitch && ["模仿 · 音高", `中位误差 ${ev.mimic_pitch.median_cents} 音分`, `${pct(ev.mimic_pitch.within_50c)} 帧在 50 音分内`],
-    ev.mimic_intelligibility && ["模仿 · 咬字", `重对齐起点中位偏差 ${ev.mimic_intelligibility.onset_median_ms} ms`, `${pct(ev.mimic_intelligibility.onset_within_50ms)} 字在 50 ms 内 · 置信度 ${ev.mimic_intelligibility.realign_confidence ?? "—"}（原唱 ${ev.mimic_intelligibility.source_confidence ?? "—"}）`],
-    ev.score_pitch && ["乐谱 · 音准", `${pct(ev.score_pitch.notes_on_pitch)} 音符在谱面音高`, `${ev.score_pitch.notes} 个音符`],
-  ].filter(Boolean).map((r) => `<tr><td>${r[0]}</td><td>${r[1]}</td><td class="muted">${r[2]}</td></tr>`).join("");
-  return `<div class="head" style="margin-top:14px"><h2>客观评估</h2><button class="ghost" id="evalBtn">${ev ? "重新评估" : "运行评估"}</button></div>
-    ${rows ? `<div style="overflow-x:auto"><table>${rows}</table></div>` : `<p class="muted" style="margin:0">用 pyin 测音高、用 SOFA 重新对齐渲染结果，约 15 秒。</p>`}`;
-}
-
-$("renderVoice").value = st.voice?.id || "imported-fixed";
-$("jsonEditor").open = true;
-$("scoreText").value = JSON.stringify(await (await api(`/v1/score?task_id=${st.task_id}`)).json(), null, 1); $("scoreText").scrollIntoView({ behavior: "smooth" }); }
-    catch (e) { alert(e.message); }
+    const version = keyVersion;
+    try {
+      if (st.spec.score_text != null) {
+        $("notationText").value = st.spec.score_text;
+        $("renderVoice").value = st.voice?.id || voiceCatalog?.default_voice_id || "";
+        clearScorePreview(); updateVoiceHints();
+        $("notationText").focus(); $("scoreComposer").scrollIntoView({behavior: "smooth"});
+      } else {
+        const score = await (await api(`/v1/score?task_id=${st.task_id}`)).json();
+        if (version !== keyVersion) return;
+        $("renderVoice").value = st.voice?.id || "";
+        clearScorePreview(); updateVoiceHints();
+        $("jsonEditor").open = true;
+        $("scoreText").value = JSON.stringify(score, null, 1);
+        $("scoreText").scrollIntoView({behavior: "smooth"});
+      }
+    } catch (e) { if (version === keyVersion) alert(e.message); }
   };
 }
 
@@ -463,6 +561,18 @@ function evalBlock(st) {
 $("scoreText").value = JSON.stringify({ phrases: [[..."一闪一闪亮晶晶"].map((t, i) => ({
   text: t, pinyin: ["yi", "shan", "yi", "shan", "liang", "jing", "jing"][i],
   notes: [{ start: 0.5 + i * 0.6, dur: i === 6 ? 1.2 : 0.6, midi: [60, 60, 67, 67, 69, 69, 67][i] }] }))] }, null, 1);
+
+const scoreExamples = {
+  basic: "1 2 3 5\n今天天晴",
+  slur: "1=C4 BPM=120\n1 (2:0.5 3:0.5) 5 0\n晴 天 好",
+  bars: "1=C4 BPM=100 4/4\n1 2 3 5 | 6:2 5:2\n今 天 风 很 | 温 暖",
+  ja: "LANG=ja\n1 2 3\nさくら",
+  en: "LANG=en\n1 2\nhello",
+};
+$("loadScoreExample").onclick = () => {
+  $("notationText").value = scoreExamples[$("scoreExample").value];
+  clearScorePreview(); $("notationText").focus();
+};
 
 let notationVersion = 0;
 function clearScorePreview() {

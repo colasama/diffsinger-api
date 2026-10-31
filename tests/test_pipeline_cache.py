@@ -109,10 +109,10 @@ def run(name, **kwargs):
     return job
 
 
-def test_repeat_skips_analysis_but_renders_new_voice_and_seed(environment):
+def test_repeat_skips_analysis_but_renders_new_voice_and_seed(environment, voice_files):
     calls, dictionary = environment
     first = run('first', synthesis_seed=1)
-    second = run('second', synthesis_seed=2, voice_id='imported-voice-g')
+    second = run('second', synthesis_seed=2, voice_id='imported-fixed')
     assert not any(first.state.cache_hits.values())
     assert all(second.state.cache_hits.values())
     assert calls == {'fetch': 1, 'separate': 1, 'align': 1, 'f0': 1, 'game': 1, 'render': 2}
