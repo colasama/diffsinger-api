@@ -34,6 +34,8 @@ from pydantic import BaseModel, Field
 from . import audio, onnx_backend, resolver, settings, sources, tools, voices
 from .pipeline import Job, JobSpec, voicebank, inference_lock
 from .score import Note, Phrase, Syllable, render_score
+from .score_task import ScoreJob
+from .text_score import ScoreError, parse_score
 
 API_KEY = os.environ.get("DSAPI_KEY", "")
 LEGACY_OWNER = "__legacy__"
@@ -145,6 +147,36 @@ def release_task(body: TaskIn, owner: Owner = LEGACY_OWNER) -> dict:
 MAX_UPLOAD = 60 * 1024 * 1024
 
 
+class TextScoreIn(BaseModel):
+    text: str = Field(min_length=1, max_length=16384)
+    voice_id: str = voices.DEFAULT_VOICE
+    synthesis_seed: int | None = Field(default=None, ge=0, le=2**32-1)
+
+
+def _parse_text_score(body: TextScoreIn):
+    validate_voice(body.voice_id)
+    try:
+        return parse_score(body.text, voicebank(body.voice_id))
+    except ScoreError as exc:
+        raise HTTPException(422, exc.detail) from exc
+
+
+@app.post("/parse_score", dependencies=[Depends(auth)])
+def preview_score(body: TextScoreIn) -> dict:
+    return _parse_text_score(body).payload()
+
+
+@app.post("/release_score_task", dependencies=[Depends(auth)])
+def release_score_task(body: TextScoreIn, owner: Owner = LEGACY_OWNER) -> dict:
+    parsed = _parse_text_score(body)
+    task_id = uuid.uuid4().hex[:12]
+    job = ScoreJob(task_id, JobSpec(score_text=body.text, modes=["score"], voice_id=body.voice_id,
+                                  synthesis_seed=body.synthesis_seed), parsed, owner_id=owner)
+    _jobs[task_id] = job
+    _job_futures[task_id] = _executor.submit(job.run)
+    return {"task_id": task_id}
+
+
 @app.post("/release_task_upload", dependencies=[Depends(auth)])
 def release_task_upload(audio_file: UploadFile = File(...), lrc_file: UploadFile | None = File(None),
                         lrc_text: str = Form(""), start: float | None = Form(None), end: float | None = Form(None),
@@ -230,8 +262,11 @@ def query_result(task_id: str, owner: Owner = LEGACY_OWNER) -> dict:
 def run_evaluation(task_id: str, owner: Owner = LEGACY_OWNER) -> dict:
     from .evaluate import evaluate
 
-    if _state(task_id, owner)["status"] != "done":
+    state = _state(task_id, owner)
+    if state["status"] != "done":
         raise HTTPException(409, "task not finished")
+    if state["spec"].get("score_text") is not None:
+        raise HTTPException(422, "自填乐谱没有原唱，无法运行原唱对比评估")
     return evaluate(settings.WORK / task_id)
 
 

@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const { chromium } = require('playwright');
+const launchOptions = { headless: true, ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } : {}) };
 
 function silentWav() {
   const data = Buffer.alloc(44 + 8000 * 2 * 30);
@@ -16,7 +17,7 @@ function silentWav() {
 }
 
 test('switching API keys clears private details and ignores an old in-flight poll', { timeout: 30000 }, async () => {
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch(launchOptions);
   try {
     const page = await browser.newPage();
     const html = readFileSync(join(__dirname, '../src/dsapi/static/index.html'), 'utf8');
@@ -61,7 +62,7 @@ test('switching API keys clears private details and ignores an old in-flight pol
 });
 
 test('delete confirms, handles errors, clears selection and protects active tasks', { timeout: 30000 }, async () => {
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch(launchOptions);
   try {
     const page = await browser.newPage();
     const errors = [];
@@ -119,7 +120,7 @@ test('delete confirms, handles errors, clears selection and protects active task
 });
 
 test('audio survives polling and completion; elapsed time advances and freezes', { timeout: 30000 }, async () => {
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch(launchOptions);
   try {
     const page = await browser.newPage();
     const errors = [];
@@ -218,4 +219,57 @@ test('audio survives polling and completion; elapsed time advances and freezes',
   } finally {
     await browser.close();
   }
+});
+
+
+test('fixed-line score preview, validation and queued submission', { timeout: 30000 }, async () => {
+  const browser = await chromium.launch(launchOptions);
+  try {
+    const page = await browser.newPage();
+    const errors = [];
+    page.on('pageerror', e => errors.push(e.message));
+    const html = readFileSync(join(__dirname, '../src/dsapi/static/index.html'), 'utf8');
+    const state = { task_id: 'score-task', status: 'done', spec: {score_text: '1 2\n天晴', modes: ['score']},
+      song: {name: '自填乐谱'}, timings: {parse_score: 0.01, render_score: 1}, outputs: {}, jianpu: '1 2\n天晴' };
+    let submitted = false;
+    await page.route('http://dsapi.test/**', route => {
+      const url = new URL(route.request().url());
+      if (url.pathname === '/ui/') return route.fulfill({contentType:'text/html', body:html});
+      if (url.pathname === '/voices') return route.fulfill({json:{default_voice_id:'imported-voice-e',voices:[{id:'imported-voice-e',name:'用户音源戊',available:true}]}});
+      if (url.pathname === '/tasks') return route.fulfill({json:submitted ? [state] : []});
+      if (url.pathname === '/query_result') return route.fulfill({json:state});
+      if (url.pathname === '/parse_score') {
+        const body = route.request().postDataJSON();
+        assert.equal(body.voice_id, 'imported-voice-e');
+        if (body.text === '1 2\n天') return route.fulfill({status:422,json:{detail:{line:2,message:'需要 2 个演唱音节，实际 1 个'}}});
+        return route.fulfill({json:{duration_seconds:1.8, rows:[{lyric_line:2,units:[{text:'天',pinyin:'tian'},{text:'晴',pinyin:'qing'}]}]}});
+      }
+      if (url.pathname === '/release_score_task') {
+        assert.deepEqual(route.request().postDataJSON(), {text:'1 2\n天晴',voice_id:'imported-voice-e'});
+        submitted = true;
+        return route.fulfill({json:{task_id:'score-task'}});
+      }
+      return route.fulfill({status:404});
+    });
+    await page.goto('http://dsapi.test/ui/');
+    await page.locator('#renderVoice option').waitFor({state:'attached'});
+    await page.locator('#notationText').fill('1 2\n天');
+    await page.locator('#parseScoreBtn').click();
+    await page.waitForFunction(() => document.querySelector('#scorePreview').textContent.includes('需要 2'));
+    assert.match(await page.locator('#scorePreview').textContent(), /第 2 行/);
+    await page.locator('#notationText').fill('1 2\n天晴');
+    assert.equal(await page.locator('#scorePreview').isHidden(), true);
+    await page.locator('#parseScoreBtn').click();
+    await page.waitForFunction(() => document.querySelector('#scorePreview').textContent.includes('天(tian)'));
+    await page.locator('#submitScoreBtn').click();
+    await page.locator('#taskStatus').waitFor();
+    assert.equal(submitted, true);
+    assert.equal(await page.locator('#taskSummary .stage').count(), 2);
+    assert.equal(await page.locator('#evalBtn').count(), 0);
+    assert.match(await page.locator('#taskExtras').textContent(), /自填乐谱/);
+    await page.locator('#apikey').fill('another-key');
+    await page.locator('#apikey').dispatchEvent('change');
+    assert.equal(await page.locator('#scorePreview').isHidden(), true);
+    assert.deepEqual(errors, []);
+  } finally { await browser.close(); }
 });

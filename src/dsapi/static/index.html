@@ -115,17 +115,26 @@ th { color: var(--muted); font-weight: 500; }
   <div>
     <section id="detail"><p class="muted">选择或提交一个任务。</p></section>
     <section>
-      <div class="head"><h2>乐谱合成</h2><button id="renderBtn">合成</button></div>
-      <p class="muted" style="font-size:12px;margin:0 0 8px">编辑 score.json（时间单位为秒，midi 为音高）后用所选音源合成，不经过提取流程。</p>
+      <div class="head"><h2>乐谱合成</h2></div>
       <label for="renderVoice">音源</label><select id="renderVoice"></select>
+      <label for="notationText">一行简谱，一行歌词</label>
+      <textarea id="notationText" spellcheck="false" style="min-height:120px">1 2 3 5
+今天天晴</textarea>
+      <p class="muted" style="font-size:12px">可选首行：1=C4 BPM=120 4/4 LANG=zh；0 休止，5:2 两拍，(2 3) 一字多音。</p>
+      <button class="ghost" id="parseScoreBtn">检查谱词</button> <button id="submitScoreBtn">提交乐谱</button>
+      <pre id="scorePreview" hidden></pre>
+      <details id="jsonEditor" style="margin-top:12px"><summary>高级：编辑 score.json</summary>
+      <p class="muted" style="font-size:12px">时间单位为秒，midi 为音高。</p>
       <textarea id="scoreText" spellcheck="false"></textarea>
+      <button id="renderBtn">合成 JSON</button>
       <div id="renderOut" style="margin-top:10px"></div>
+      </details>
     </section>
   </div>
 </main>
 <script>
 const STAGES = ["fetch", "select", "separate", "align", "notes_f0", "build", "quantize", "render_mimic", "render_score"];
-const STAGE_NAMES = { fetch: "取歌", select: "选段", separate: "人声分离", notes_f0: "音符/F0", align: "歌词对齐",
+const STAGE_NAMES = { parse_score: "解析乐谱", fetch: "取歌", select: "选段", separate: "人声分离", notes_f0: "音符/F0", align: "歌词对齐",
   build: "组装", quantize: "量化/简谱", render_mimic: "模仿渲染", render_score: "乐谱渲染" };
 const OUT_NAMES = { clip: "原曲片段", lead: "分离人声", mimic: "模仿模式", score: "乐谱模式", mimic_mix: "模仿模式＋伴奏", score_mix: "乐谱模式＋伴奏" };
 const $ = (id) => document.getElementById(id);
@@ -374,7 +383,7 @@ function renderDetail(st) {
     detail.innerHTML = `<div id="taskSummary"></div><div id="taskPlayers" class="players"></div><div id="taskExtras"></div>`;
     detail.dataset.taskId = st.task_id;
   }
-  const wanted = STAGES.filter((s) => !s.startsWith("render_") || (st.spec.modes || []).includes(s.slice(7)));
+  const wanted = st.spec.score_text != null ? ["parse_score", "render_score"] : STAGES.filter((s) => !s.startsWith("render_") || (st.spec.modes || []).includes(s.slice(7)));
   const stages = wanted.map((s) => {
     const t = st.timings[s];
     const cls = t !== undefined ? "ok" : (st.stage === s && st.status === "running" ? "cur" : "");
@@ -400,8 +409,8 @@ function renderDetail(st) {
   updateElapsed();
   syncPlayers(st.outputs);
   $("taskExtras").innerHTML = `
-    ${st.jianpu ? `<div class="head" style="margin-top:14px"><h2>简谱（自动转写，可能有误）</h2><button class="ghost" id="toEditor">载入合成器</button></div><pre>${esc(st.jianpu)}</pre>` : ""}
-    ${st.status === "done" ? evalBlock(st) : ""}
+    ${st.jianpu ? `<div class="head" style="margin-top:14px"><h2>${st.spec.score_text != null ? "自填乐谱" : "简谱（自动转写，可能有误）"}</h2>${st.status === "done" ? '<button class="ghost" id="toEditor">载入合成器</button>' : ''}</div><pre>${esc(st.jianpu)}</pre>` : ""}
+    ${st.status === "done" && st.spec.score_text == null ? evalBlock(st) : ""}
     ${align ? `<h2 style="margin-top:14px">对齐报告</h2><div style="overflow-x:auto"><table><tr><th>歌词行</th><th>置信度</th><th>字数</th><th>音符</th></tr>${align}</table></div>` : ""}`;
   const evBtn = $("evalBtn");
   if (evBtn) evBtn.onclick = async () => {
@@ -424,6 +433,7 @@ function renderDetail(st) {
 }
 
 $("renderVoice").value = st.voice?.id || "imported-fixed";
+$("jsonEditor").open = true;
 $("scoreText").value = JSON.stringify(await (await api(`/v1/score?task_id=${st.task_id}`)).json(), null, 1); $("scoreText").scrollIntoView({ behavior: "smooth" }); }
     catch (e) { alert(e.message); }
   };
@@ -444,6 +454,46 @@ function evalBlock(st) {
 $("scoreText").value = JSON.stringify({ phrases: [[..."一闪一闪亮晶晶"].map((t, i) => ({
   text: t, pinyin: ["yi", "shan", "yi", "shan", "liang", "jing", "jing"][i],
   notes: [{ start: 0.5 + i * 0.6, dur: i === 6 ? 1.2 : 0.6, midi: [60, 60, 67, 67, 69, 69, 67][i] }] }))] }, null, 1);
+
+let notationVersion = 0;
+function clearScorePreview() {
+  ++notationVersion;
+  $("scorePreview").textContent = "";
+  $("scorePreview").hidden = true;
+}
+$("notationText").addEventListener("input", clearScorePreview);
+$("renderVoice").addEventListener("change", clearScorePreview);
+$("apikey").addEventListener("change", clearScorePreview);
+for (const [id, path] of [["parseScoreBtn", "/parse_score"], ["submitScoreBtn", "/release_score_task"]]) {
+  $(id).onclick = async () => {
+    const version = keyVersion, revision = notationVersion;
+    const body = { text: $("notationText").value, voice_id: $("renderVoice").value };
+    $(id).disabled = true;
+    try {
+      const res = await fetch(withKey(path), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const result = await res.json();
+      if (version !== keyVersion) return;
+      if (!res.ok) {
+        const d = result.detail;
+        throw new Error(d?.message ? `第 ${d.line} 行：${d.message}` : typeof d === "string" ? d : "乐谱格式有误或内容过长");
+      }
+      if (path === "/parse_score") {
+        if (revision !== notationVersion) return;
+        $("scorePreview").hidden = false;
+        $("scorePreview").textContent = `预计 ${result.duration_seconds.toFixed(1)} 秒\n` + result.rows.map(r =>
+          `第 ${r.lyric_line} 行：` + r.units.map(u => `${u.text}(${u.pinyin})`).join(" ")).join("\n");
+      } else {
+        await loadTasks();
+        if (version === keyVersion) select(result.task_id);
+      }
+    } catch (e) {
+      if (version === keyVersion && revision === notationVersion) {
+        $("scorePreview").hidden = false;
+        $("scorePreview").textContent = e.message;
+      }
+    } finally { $(id).disabled = false; }
+  };
+}
 
 $("renderBtn").onclick = async () => {
   let body;

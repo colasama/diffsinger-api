@@ -63,7 +63,7 @@ def _tagger():
     return fugashi.Tagger()
 
 
-def reading(text: str) -> str:
+def reading(text: str, *, strict: bool = False) -> str:
     """Katakana reading of a lyric line; non-Japanese characters are dropped."""
     out = []
     for w in _tagger()(text):
@@ -73,6 +73,8 @@ def reading(text: str) -> str:
             continue
         kana = getattr(w.feature, "kana", None)
         if not kana or kana == "*":
+            if strict and not has_kana(surface) and re.search(r"[\u3400-\u9fff々]", surface):
+                raise ValueError(f"无法识别 {surface} 的日语读音，请改填假名")
             kana = surface if has_kana(surface) else ""
         if w.feature.pos1 == "助詞" and kana in _PARTICLES:
             kana = _PARTICLES[kana]

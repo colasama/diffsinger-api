@@ -38,6 +38,7 @@ class JobSpec:
     voice_id: str = voices.DEFAULT_VOICE
     synthesis_seed: int | None = None
     with_accompaniment: bool = False
+    score_text: str | None = None
 
 
 @dataclass

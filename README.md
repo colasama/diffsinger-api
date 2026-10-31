@@ -391,3 +391,53 @@ once to -16 LUFS / -1.5 dBTP before MP3 encoding. Long outputs use
 `score_mix_part_0000` / `mimic_mix_part_0000` etc., retaining the complete mix's
 normalization across parts. `job.json.mixing` records gain and frame adjustment.
 Separated accompaniment can retain some original vocal leakage.
+
+
+### 自填简谱和歌词
+
+Gokohime 输入 `.score` 会发送一张谱子格式说明图片，包含演唱示例和符号说明。最简输入：
+
+```text
+.score 戊
+1 2 3 5
+今天天晴
+```
+
+命令首行只填写可选歌手，支持 `.voices` 中的别名；省略歌手时用用户音源戊。
+未知歌手会报错，不会将乐谱作为歌曲搜索。后续非空行严格交替为简谱、歌词，
+无需“谱/词”前缀。可以连续追加多对行；换行不额外增加停顿。
+
+首个内容行可填写参数，例如 `1=C4 BPM=100 4/4 LANG=zh`；各项均可省略，
+默认 `1=C4 BPM=120 4/4 LANG=zh`。BPM 为每分钟四分音符数。
+`LANG=ja` 按日语音拍拆词，`LANG=en` 按音源词典中的元音音节拆词。
+网页的“检查谱词”和 `POST /parse_score` 会显示实际拆分结果。
+
+- `1`–`7`：音阶，每音默认一拍；`0`：休止，不占歌词。
+- `1'` / `1,`：升高 / 降低八度；`#4` / `b7`：升 / 降半音。
+- `5:2` / `3:0.5` / `3:1.5`：两拍 / 半拍 / 一拍半，所有时值以四分音符为单位。
+- `(2:0.5 3:0.5)`：一字多音，括号内至少两个音符，不允许休止。
+- 中文每字一个演唱音节，忽略空格与一般标点；多音字可写 `行(xing)`。
+- `|` 分隔小节；写了小节线就校验每小节总拍数。歌词可对应写 `|`；不写则按整行匹配。
+- 纯休止行的歌词填写 `-`，因为空行会忽略。
+
+示例（每小节四拍）：
+
+```text
+.score 心
+1=C4 BPM=100 4/4
+1 (2:0.5 3:0.5) 5 0 | 6:2 5:2
+晴 天 好 | 向 前
+```
+
+不受搜歌的 32 秒片段限制，长谱按短乐句合成后按原时间轴拼接；超过发送大小时沿用分段发送。
+为控制单次模型任务的资源，输入最多 16384 字符、8192 个音符（含休止符）、30 分钟（含首尾静音），
+单字及其连音最多 60 秒，单音时值为 0.0625–64 拍，BPM 为 20–400。
+自填乐谱生成干声，不提供原唱对比或原曲伴奏。
+
+API 两个入口都接收 `{"text":"1 2 3 5\n今天天晴","voice_id":"imported-voice-e"}`：
+
+- `POST /parse_score`：返回 `phrases`、`rows`（歌词拆分）、`duration_seconds` 和节拍参数；不会创建任务。
+- `POST /release_score_task`：服务端重新校验并返回 `task_id`；支持可选 `synthesis_seed`，共用现有队列、鉴权、查询、音频下载及删除接口。
+
+格式错误返回 HTTP 422，`detail` 包含 `line`、`column`、`message`；行号从内容第一行开始，不含 `.score` 命令行。
+现有 `/render_score` JSON 接口继续保留；网页“乐谱合成”提供固定行输入和可展开的 JSON 编辑器。
