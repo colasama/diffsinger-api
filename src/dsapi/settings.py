@@ -20,6 +20,19 @@ CACHE_TTL = max(0, float(os.environ.get("DSAPI_CACHE_TTL", "86400")))
 CACHE_MAX_BYTES = max(0, int(os.environ.get("DSAPI_CACHE_MAX_BYTES", str(5 * 1024**3))))
 PREFETCH_DOWNLOADS = os.environ.get("DSAPI_PREFETCH", "1").lower() in ("1", "true", "yes")
 
+
+def _positive_int(name: str, default: int) -> int:
+    value = int(os.environ.get(name, str(default)))
+    if value < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+ACTIVE_JOBS = _positive_int("DSAPI_ACTIVE_JOBS", 3)
+# Share a GPU budget across MPS separation, child-process alignment and synthesis.
+# Raising this is experimental; the native WebGPU Run lock remains in force.
+GPU_CONCURRENCY = _positive_int("DSAPI_GPU_CONCURRENCY", 1)
+
 VOICEBANK = Path(os.environ.get("DSAPI_VOICEBANK", MODELS / "voicebank")).expanduser()
 VOCODER = Path(os.environ.get("DSAPI_VOCODER", MODELS / "vocoder")).expanduser()
 VOICES_FILE = Path(os.environ["DSAPI_VOICES_FILE"]).expanduser().resolve() if os.environ.get("DSAPI_VOICES_FILE") else None

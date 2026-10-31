@@ -32,6 +32,13 @@ background jobs. This sacrifices concurrent throughput to avoid the upstream
 native concurrent-Run crash. Explicit WebGPU failures surface as errors. Automatic fallback applies only to
 session initialization; inference errors are not retried on another backend.
 
+The application now admits a bounded number of jobs and serializes individual
+model stages instead of holding a lock around an entire job. The default shared
+GPU budget is still one: MPS separation, child-process HubertFA alignment and
+synthesis take turns, while CPU extraction and I/O can overlap. See the README's
+stage concurrency settings. The measurements below predate this scheduler and
+must not be interpreted as parallel throughput or memory measurements.
+
 Two nodes need CPU fallback with the current voicebank/plugin:
 
 ```

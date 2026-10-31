@@ -182,7 +182,7 @@ section { scroll-margin-top: 16px; }
 </main>
 <script>
 const STAGES = ["fetch", "select", "separate", "align", "notes_f0", "build", "quantize", "render_mimic", "render_score"];
-const STAGE_NAMES = { parse_score: "解析乐谱", fetch: "取歌", select: "选段", separate: "人声分离", notes_f0: "音符/F0", align: "歌词对齐",
+const STAGE_NAMES = { parse_score: "解析乐谱", fetch: "取歌", select: "选段", separate: "人声分离", notes_f0: "音符/F0", align: "歌词对齐", align_f0: "对齐 / 音高",
   build: "组装", quantize: "量化/简谱", render_mimic: "模仿渲染", render_score: "乐谱渲染" };
 const OUT_NAMES = { clip: "原曲片段", lead: "分离人声", mimic: "模仿模式", score: "乐谱模式", mimic_mix: "模仿模式＋伴奏", score_mix: "乐谱模式＋伴奏" };
 const $ = (id) => document.getElementById(id);
@@ -490,7 +490,8 @@ function renderDetail(st) {
     detail.dataset.taskId = st.task_id;
   }
   const wanted = st.spec.score_text != null ? ["parse_score", "render_score"] : STAGES.filter((s) => !(st.spec.audio_only && s === "quantize") && (!s.startsWith("render_") || (st.spec.modes || []).includes(s.slice(7))));
-  const stages = wanted.map((s) => {
+  const stages = wanted.map((stage) => {
+    const s = stage === "align" && (st.stage === "align_f0" || st.timings.align_f0 !== undefined) ? "align_f0" : stage;
     const t = st.timings[s];
     const cls = t !== undefined ? "ok" : (st.stage === s && st.status === "running" ? "cur" : "");
     return `<span class="stage ${cls}">${STAGE_NAMES[s]}${t !== undefined ? " " + t + "s" : ""}</span>`;

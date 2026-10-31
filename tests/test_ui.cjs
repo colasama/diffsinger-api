@@ -201,6 +201,15 @@ test('audio survives polling and completion; elapsed time advances and freezes',
     await page.waitForTimeout(300);
     assert.equal(await elapsed(), 'failed · 12.3s');
 
+    // Concurrent analysis has one wall-clock stage, without duplicate timing chips.
+    await page.evaluate(() => renderDetail({ task_id: 'parallel', status: 'running',
+      stage: 'align_f0', elapsed_seconds: 3, spec: {}, timings: {}, outputs: {} }));
+    assert.equal(await page.locator('.stage.cur').textContent(), '对齐 / 音高');
+    await page.evaluate(() => renderDetail({ task_id: 'parallel', status: 'running',
+      stage: 'notes_f0', elapsed_seconds: 5, spec: {}, timings: { align_f0: 4 }, outputs: {} }));
+    assert.match(await page.locator('.stage.ok').textContent(), /对齐 \/ 音高 4s/);
+    assert.equal(await page.locator('.stage.cur').textContent(), '音符/F0');
+
     // Legacy servers without timestamps must not reset the clock at each poll.
     await page.evaluate(() => {
       current = 'legacy';

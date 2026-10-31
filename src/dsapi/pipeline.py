@@ -13,15 +13,15 @@ import secrets
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from importlib.metadata import version
-from threading import RLock
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import numpy as np
 
-from . import audio, cache, extract, jianpu, lrc, selection, settings, sources, tools, voices
+from . import audio, cache, extract, jianpu, lrc, scheduling, selection, settings, sources, tools, voices
 from .score import Phrase, render_mimic, render_score
+from .errors import error_info
 from .voicebank import Voicebank
 
 MAX_CLIP = 40.0
@@ -66,15 +66,13 @@ class JobState:
     jianpu: str | None = None
     outputs: dict[str, str] = field(default_factory=dict)
     error: str | None = None
+    error_info: dict | None = None
     mixing: dict = field(default_factory=dict)
     voice: dict | None = None
     owner_id: str | None = None
     submitted_at: float = field(default_factory=lambda: time.time())
     cache_hits: dict[str, bool] = field(default_factory=dict)
     metrics: dict[str, float] = field(default_factory=dict)
-
-
-inference_lock = RLock()
 
 
 def voicebank(voice_id: str | None = None, seed: int | None = None) -> Voicebank:
@@ -117,17 +115,23 @@ class Job:
         return _Stage()
 
     def run(self) -> JobState:
+        # Admission bounds live intermediates, including direct/CLI Job callers.
+        # A task waiting here remains queued and has not started its elapsed clock.
+        with scheduling.scheduler.jobs.enter():
+            return self._run_admitted()
+
+    def _run_admitted(self) -> JobState:
         st = self.state
         st.status = "running"
         st.started_at = time.time()
         st.metrics["queue_seconds"] = max(0., st.started_at - st.submitted_at)
         self.save()
         try:
-            with inference_lock:
-                self._run()
+            self._run()
             st.status, st.stage = "done", ""
         except Exception as e:  # noqa: BLE001 - surfaced to the API caller
             st.status, st.error = "failed", f"{type(e).__name__}: {e}"
+            st.error_info = error_info(e, st.stage)
             (self.dir / "error.txt").write_text(traceback.format_exc())
         st.finished_at = time.time()
         self.save()
@@ -241,41 +245,27 @@ class Job:
                 lead_path, inst_path = outputs["lead.wav"], outputs["instrumental.wav"]
             lead = audio.load(lead_path)
 
-        with self.stage("align"):
-            segs = extract.write_segments(chosen, lead, d / "segments", vb, before=before, after=after,
-                                          clip_start=start)
-            if not segs:
-                raise RuntimeError("no lyric units the voicebank can sing in this window")
-            ckpt, dictionary = Path(segs[0]["ckpt"]), Path(segs[0]["dictionary"])
-            key = artifacts.key("align", {"runtime": runtime, "backend": segs[0]["backend"],
-                "language": segs[0]["lang"], "model": cache.files([ckpt.parent]),
-                "dictionary": cache.digest(dictionary),
-                "inputs": {p.name: cache.digest(p) for p in sorted((d / "segments").glob("*"))
-                           if p.suffix in (".wav", ".lab")},
-                "vendor": cache.files((settings.VENDOR / ("HubertFA" if segs[0]["backend"] == "hubertfa" else "SOFA")).rglob("*.py"), content=True)})
-            st.cache_hits["align"] = artifacts.restore(key, {"sofa.json": d / "sofa.json"})
-            if st.cache_hits["align"]:
-                sofa = json.loads((d / "sofa.json").read_text())
+        backend = tools.note_backend()
+        parallel_f0 = backend == "game-medium" or spec.audio_only
+        with self.stage("align_f0" if parallel_f0 else "align"):
+            if parallel_f0:
+                # The executor drains even if alignment fails, before the job can
+                # become terminal or its directory can be deleted.
+                with ThreadPoolExecutor(max_workers=1, thread_name_prefix="f0") as analysis:
+                    pending_f0 = analysis.submit(self._extract_f0, lead_path, artifacts, runtime)
+                    segs, sofa, align_hit, align_seconds = self._align(
+                        chosen, lead, vb, before, after, start, artifacts, runtime)
+                    f0, f0_hit, f0_seconds = pending_f0.result()
+                st.cache_hits["f0"] = f0_hit
+                st.metrics["f0_seconds"] = round(f0_seconds, 4)
             else:
-                sofa = tools.align(d / "segments", d, ckpt, dictionary,
-                                   backend=segs[0]["backend"], lang=segs[0]["lang"])
-                if not any("error" in value for value in sofa.values()):
-                    artifacts.store(key, {"sofa.json": d / "sofa.json"})
+                segs, sofa, align_hit, align_seconds = self._align(
+                    chosen, lead, vb, before, after, start, artifacts, runtime)
+            st.cache_hits["align"] = align_hit
+            st.metrics["align_seconds"] = round(align_seconds, 4)
 
         with self.stage("notes_f0"):
-            backend = tools.note_backend()
-            if backend == "game-medium" or spec.audio_only:
-                with self.measure("f0_seconds"):
-                    key = artifacts.key("f0", {"audio": cache.digest(lead_path), "runtime": runtime,
-                        "model": cache.files([settings.RMVPE_CKPT]),
-                        "vendor": cache.files([settings.VENDOR / "SOME/modules/rmvpe",
-                                               settings.VENDOR / "SOME/utils/pitch_utils.py"], content=True)})
-                    st.cache_hits["f0"] = artifacts.restore(key, {"f0.npy": d / "f0.npy"})
-                    if st.cache_hits["f0"]:
-                        f0 = np.load(d / "f0.npy")[0]
-                    else:
-                        f0, _ = tools.extract_f0(lead_path, d)
-                        artifacts.store(key, {"f0.npy": d / "f0.npy"})
+            if parallel_f0:
                 if spec.audio_only:
                     notes = []
                     st.note_extraction = {"backend": "skipped", "reason": "audio_only"}
@@ -332,6 +322,46 @@ class Job:
         with self.measure("reference_encode_seconds"):
             st.outputs["lead"] = str(audio.to_mp3(lead_path, d / "lead.mp3", loudnorm=False))
             st.outputs["clip"] = str(audio.to_mp3(clip, d / "clip.mp3", loudnorm=False))
+
+    def _align(self, chosen, lead, vb, before, after, start, artifacts, runtime):
+        d = self.dir
+        started = time.perf_counter()
+        segs = extract.write_segments(chosen, lead, d / "segments", vb, before=before, after=after,
+                                      clip_start=start)
+        if not segs:
+            raise RuntimeError("no lyric units the voicebank can sing in this window")
+        ckpt, dictionary = Path(segs[0]["ckpt"]), Path(segs[0]["dictionary"])
+        key = artifacts.key("align", {"runtime": runtime, "backend": segs[0]["backend"],
+            "language": segs[0]["lang"], "model": cache.files([ckpt.parent]),
+            "dictionary": cache.digest(dictionary),
+            "inputs": {p.name: cache.digest(p) for p in sorted((d / "segments").glob("*"))
+                       if p.suffix in (".wav", ".lab")},
+            "vendor": cache.files((settings.VENDOR / ("HubertFA" if segs[0]["backend"] == "hubertfa" else "SOFA")).rglob("*.py"), content=True)})
+        hit = artifacts.restore(key, {"sofa.json": d / "sofa.json"})
+        if hit:
+            sofa = json.loads((d / "sofa.json").read_text())
+        else:
+            sofa = tools.align(d / "segments", d, ckpt, dictionary,
+                               backend=segs[0]["backend"], lang=segs[0]["lang"])
+            if not any("error" in value for value in sofa.values()):
+                artifacts.store(key, {"sofa.json": d / "sofa.json"})
+        return segs, sofa, hit, time.perf_counter() - started
+
+    def _extract_f0(self, lead_path, artifacts, runtime):
+        # Runs in a sibling thread; only the job thread may update/save JobState.
+        d = self.dir
+        started = time.perf_counter()
+        key = artifacts.key("f0", {"audio": cache.digest(lead_path), "runtime": runtime,
+            "model": cache.files([settings.RMVPE_CKPT]),
+            "vendor": cache.files([settings.VENDOR / "SOME/modules/rmvpe",
+                                   settings.VENDOR / "SOME/utils/pitch_utils.py"], content=True)})
+        hit = artifacts.restore(key, {"f0.npy": d / "f0.npy"})
+        if hit:
+            f0 = np.load(d / "f0.npy")[0]
+        else:
+            f0, _ = tools.extract_f0(lead_path, d)
+            artifacts.store(key, {"f0.npy": d / "f0.npy"})
+        return f0, hit, time.perf_counter() - started
 
     def _mix(self, kind: str, rendered: Iterable[tuple[Phrase, np.ndarray]], n: int,
              instrumental: Path | None = None, reference: Path | None = None) -> None:

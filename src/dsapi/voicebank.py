@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from functools import cached_property, lru_cache
 import hashlib
 import time
+from threading import RLock
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +21,7 @@ from . import settings
 from .onnx_backend import OnnxSession, create_session
 
 LANGS = ("zh", "ja", "en")
+_model_init_lock = RLock()
 
 
 @lru_cache(maxsize=16)
@@ -156,7 +158,9 @@ class _Dictionaries(Mapping):
 class Voicebank:
     def __init__(self, root: Path = settings.VOICEBANK, vocoder: Path = settings.VOCODER,
                  *, speaker: str | None = None, seed: int | None = None):
-        self.acoustic, self.dur, self.pitch, self.variance = _models(root.resolve())
+        # lru_cache alone may execute a cold miss multiple times concurrently.
+        with _model_init_lock:
+            self.acoustic, self.dur, self.pitch, self.variance = _models(root.resolve())
         self.speaker = speaker
         self.rng = np.random.default_rng(seed)
         self._embeddings = {}

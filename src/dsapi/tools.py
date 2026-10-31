@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import settings
+from . import scheduling, settings
 
 RUNNERS = Path(__file__).parent / "runners"
 _workers: dict[tuple[str, str], "_Worker"] = {}
@@ -116,7 +116,12 @@ atexit.register(close_workers)
 def _run(vendor: str, script: str, *args: str, log: Path) -> None:
     with _workers_lock:
         worker = _workers.setdefault((vendor, script), _Worker(vendor, script))
-    worker.run(args, log)
+    stage = {"hubertfa_runner.py": "align", "sofa_runner.py": "align",
+             "f0_runner.py": "f0", "some_runner.py": "f0", "game_runner.py": "game"}.get(script, script)
+    gpu = script == "hubertfa_runner.py" or settings.torch_device() == "cuda"
+    # The parent owns this budget even when the model executes in a child process.
+    with scheduling.scheduler.resource(stage, gpu=gpu):
+        worker.run(args, log)
 
 
 def extract_some_notes_f0(wav: Path, out_dir: Path) -> tuple[list[dict], np.ndarray, np.ndarray]:

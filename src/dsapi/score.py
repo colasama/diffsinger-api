@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .voicebank import Notes, Voicebank, frames_from_bounds, hz_to_midi
+from . import scheduling
 
 HEAD = 0.5  # seconds of SP before the first note, room for its consonant
 TAIL = 0.3
@@ -126,6 +127,7 @@ def score_inputs(vb: Voicebank, phrase: Phrase):
     return phones, np.array(word_div), frames_from_bounds(word_bounds), np.array(ph_midi), notes
 
 
+@scheduling.stage("synthesis", gpu=True)
 def render_score(vb: Voicebank, phrase: Phrase) -> np.ndarray:
     phones, word_div, word_dur, ph_midi, notes = score_inputs(vb, phrase)
     ph_dur = vb.predict_durations(phones, word_div, word_dur, ph_midi)
@@ -133,6 +135,7 @@ def render_score(vb: Voicebank, phrase: Phrase) -> np.ndarray:
     return vb.render(phones, ph_dur, pitch)
 
 
+@scheduling.stage("synthesis", gpu=True)
 def render_mimic(vb: Voicebank, phrase: Phrase) -> np.ndarray:
     """Use aligned phonemes and the source f0 directly; no dur/pitch prediction."""
     names = [p for p, _, _ in phrase.phones]

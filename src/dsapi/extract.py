@@ -11,6 +11,7 @@ from . import audio, japanese, settings, tools
 from .lrc import Line
 from .score import Note, Phrase, Syllable
 from .voicebank import Voicebank, hz_to_midi
+from .errors import TaskError
 
 MIN_NOTE = 0.06
 CONSONANT_GAP = 0.25  # gaps shorter than this between syllables are consonants, not rests
@@ -32,6 +33,31 @@ def _in_clip(ln: Line, lo: float, hi: float) -> list[tuple[str, str, str]]:
     n = len(ln.units)
     step = (ln.end - ln.start) / max(n, 1)
     return [u for k, u in enumerate(ln.routed_units) if lo <= ln.start + (k + 0.5) * step <= hi]
+
+
+# Explicit, position-preserving differences between the Mandarin dictionaries.
+# The glide depends on the syllable: H is not a global alias for y or y0.
+_ZH_PHONE_ALIASES = {
+    *{(word, 0, "zh/y0", "zh/H") for word in ("yu", "yuan", "yue", "yun")},
+    *{(word, 0, "zh/y", "zh/H") for word in ("yong", "ywu")},
+    ("yo", 1, "zh/io", "zh/o"),
+}
+
+
+def _chinese_phone_mapping(unit: str, synthesis: list[str], dictionary: dict[str, list[str]]) -> dict:
+    alignment = dictionary.get(unit)
+    if not alignment:
+        raise TaskError(f"Chinese word missing from HubertFA dictionary: {unit}",
+                        "LYRIC_WORD_NOT_FOUND", word=unit, language="zh", source="aligner_dictionary")
+    if len(alignment) != len(synthesis) or any(
+        a != b and (unit, i, a, b) not in _ZH_PHONE_ALIASES
+        for i, (a, b) in enumerate(zip(alignment, synthesis))
+    ):
+        raise TaskError(f"Unsupported Chinese phoneme mapping for {unit}: "
+                        f"HubertFA {alignment} -> synthesis {synthesis}",
+                        "PHONEME_UNSUPPORTED", word=unit, language="zh",
+                        alignment=alignment, synthesis=synthesis)
+    return {"alignment": alignment, "synthesis": synthesis}
 
 
 def write_segments(lines: list[Line], lead: np.ndarray, seg_dir: Path, vb: Voicebank,
@@ -97,7 +123,11 @@ def write_segments(lines: list[Line], lead: np.ndarray, seg_dir: Path, vb: Voice
         for c, py, unit_lang in units:
             if (k >= 0 or lang in ("en", "mixed") or (lang == "ja" and backend == "hubertfa")) and not known(py, unit_lang):
                 language = {"en": "English", "ja": "Japanese", "zh": "Chinese"}[unit_lang]
-                raise ValueError(f"{language} word missing from voicebank dictionary: {py}")
+                raise TaskError(f"{language} word missing from voicebank dictionary: {py}",
+                                "LYRIC_WORD_NOT_FOUND", word=py, language=unit_lang,
+                                text=c, line=lines[k].text if k >= 0 else None,
+                                start=lines[k].start if k >= 0 else None,
+                                source="lyrics" if k >= 0 else "alignment_context")
             if known(py, unit_lang):
                 chars.append(c)
                 pinyin.append(f"{unit_lang}:{py}" if lang == "mixed" else py)
@@ -108,17 +138,31 @@ def write_segments(lines: list[Line], lead: np.ndarray, seg_dir: Path, vb: Voice
         return []
     audio.save(seg_dir / "clip.wav", lead)
     (seg_dir / "clip.lab").write_text(" ".join(pinyin), encoding="utf8")
+    phone_mappings = {}
     if backend == "hubertfa" and lang in ("en", "ja", "mixed"):
         ckpt, dictionary = settings.HUBERTFA_MODEL, seg_dir.parent / "hubertfa_dict.txt"
         vocab = json.loads((ckpt.parent / "vocab.json").read_text())["vocab"]
         pronunciations = {key: vb.g2p(u, language) for key, u, language in zip(pinyin, word_units, word_langs)}
         def align_phone(phone):
             return {"ja/cl": "cl", "en/#r": "en/_r"}.get(phone, phone)
-        unknown = {p for phones in pronunciations.values() for p in phones if align_phone(p) not in vocab}
+        pronunciations = {key: [align_phone(p) for p in phones] for key, phones in pronunciations.items()}
+        if lang == "mixed" and "zh" in word_langs:
+            chinese = {}
+            for line in settings.HUBERTFA_DICT.read_text(encoding="utf-8-sig").splitlines():
+                if "\t" in line:
+                    unit, phones = line.split("\t", 1)
+                    chinese[unit.strip()] = [p if p.startswith("zh/") else "zh/" + p for p in phones.split()]
+            for key, unit, language in zip(pinyin, word_units, word_langs):
+                if language == "zh" and key not in phone_mappings:
+                    mapping = _chinese_phone_mapping(unit, vb.g2p(unit, "zh"), chinese)
+                    phone_mappings[key] = mapping
+                    pronunciations[key] = mapping["alignment"]
+        unknown = {p for phones in pronunciations.values() for p in phones if p not in vocab}
         if unknown:
-            raise ValueError(f"Phonemes missing from HubertFA {lang} vocabulary: {sorted(unknown)}")
+            raise TaskError(f"Phonemes missing from HubertFA {lang} vocabulary: {sorted(unknown)}",
+                            "PHONEME_UNSUPPORTED", phonemes=sorted(unknown))
         dictionary.write_text("".join(
-            f"{key}\t{' '.join(align_phone(p) if lang == 'mixed' else align_phone(p).removeprefix(lang + '/') for p in phones)}\n"
+            f"{key}\t{' '.join(p if lang == 'mixed' else p.removeprefix(lang + '/') for p in phones)}\n"
             for key, phones in sorted(pronunciations.items())), encoding="utf8")
     elif lang == "zh":
         ckpt = settings.HUBERTFA_MODEL if backend == "hubertfa" else settings.SOFA_CKPT
@@ -133,16 +177,25 @@ def write_segments(lines: list[Line], lead: np.ndarray, seg_dir: Path, vb: Voice
             "ckpt": str(ckpt), "dictionary": str(dictionary)}
     (seg_dir.parent / "align_meta.json").write_text(json.dumps(meta))
     segments = [{"name": "clip", "offset": 0.0, "chars": chars, "pinyin": pinyin, "line_of": line_of,
-             "word_units": word_units, "word_langs": word_langs,
+             "word_units": word_units, "word_langs": word_langs, "phone_mappings": phone_mappings,
              "texts": [ln.text for ln in lines], **meta}]
     (seg_dir.parent / "segments.json").write_text(json.dumps(segments, ensure_ascii=False, indent=2))
     return segments
 
 
-def _map_phones(vb: Voicebank, py: str, sofa: list[tuple[str, float, float]], lang: str = "zh"
+def _map_phones(vb: Voicebank, py: str, sofa: list[tuple[str, float, float]], lang: str = "zh",
+                mapping: dict | None = None
                 ) -> list[tuple[str, float, float]]:
     """Map aligned phonemes onto the voicebank without moving matched boundaries."""
     target = vb.g2p(py, lang)
+    if mapping is not None:
+        actual = [p if "/" in p else f"{lang}/{p}" for p, _, _ in sofa]
+        if target != mapping["synthesis"] or actual != mapping["alignment"] or len(target) != len(sofa):
+            raise TaskError(f"Aligned phonemes do not match the validated mapping for {py}: "
+                            f"expected {mapping['alignment']}, got {actual}; synthesis {target}",
+                            "PHONEME_UNSUPPORTED", word=py, language=lang,
+                            alignment=actual, synthesis=target)
+        return [(t, start, end) for t, (_, start, end) in zip(target, sofa)]
     if len(target) == len(sofa):
         return [(t, s, e) for t, (_, s, e) in zip(target, sofa)]
     s, e = sofa[0][1], sofa[-1][2]
@@ -230,7 +283,8 @@ def build_phrases(vb: Voicebank, segs: list[dict], sofa: dict, notes: list[dict]
         word_phones, spans = [], []  # per syllable: mapped phones; (vowel onset, end)
         for i, (_, ws, we) in enumerate(words):
             sofa_ph = [x for x in all_phones if x[0] not in ("SP", "AP") and x[1] >= ws - 1e-4 and x[2] <= we + 1e-4]
-            mapped = _map_phones(vb, units[i], sofa_ph, langs[i])
+            mapped = _map_phones(vb, units[i], sofa_ph, langs[i],
+                                 seg.get("phone_mappings", {}).get(seg["pinyin"][i]))
             word_phones.append(mapped)
             spans.append((next((s for p, s, _ in mapped if vb.is_vowel(p)), ws), we))
         word_spans = [(ws, we) for _, ws, we in words]

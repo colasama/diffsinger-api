@@ -3,6 +3,7 @@ import shutil
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Event
 
 import numpy as np
 import pytest
@@ -173,6 +174,69 @@ def test_simultaneous_same_song_prefetch_downloads_only_once(environment, monkey
     assert environment[0]['fetch'] == 1
     assert sorted(r['cache_hit'] for r in results) == [False, True]
     assert all(job.state.status == 'queued' for job in jobs)
+
+
+def test_alignment_and_f0_overlap_and_game_waits_for_both(environment, monkeypatch):
+    barrier = Barrier(2, timeout=5)
+    completed = set()
+    original_align, original_f0 = pipeline.tools.align, pipeline.tools.extract_f0
+    original_game = pipeline.tools.extract_game_notes
+
+    def align(*args, **kwargs):
+        barrier.wait()
+        result = original_align(*args, **kwargs)
+        completed.add('align')
+        return result
+
+    def f0(*args, **kwargs):
+        barrier.wait()
+        result = original_f0(*args, **kwargs)
+        completed.add('f0')
+        return result
+
+    def game(*args, **kwargs):
+        assert completed == {'align', 'f0'}
+        return original_game(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline.tools, 'align', align)
+    monkeypatch.setattr(pipeline.tools, 'extract_f0', f0)
+    monkeypatch.setattr(pipeline.tools, 'extract_game_notes', game)
+    job = run('parallel-analysis')
+    assert 'align_f0' in job.state.timings
+    assert job.state.metrics['align_seconds'] > 0
+    assert job.state.metrics['f0_seconds'] > 0
+
+
+def test_alignment_failure_drains_f0_before_terminal_status(environment, monkeypatch):
+    started, failed, release, finished = (Event() for _ in range(4))
+    original = pipeline.tools.extract_f0
+
+    def f0(*args, **kwargs):
+        started.set()
+        assert release.wait(5)
+        result = original(*args, **kwargs)
+        finished.set()
+        return result
+
+    def align(*args, **kwargs):
+        assert started.wait(5)
+        failed.set()
+        raise RuntimeError('alignment failed')
+
+    monkeypatch.setattr(pipeline.tools, 'align', align)
+    monkeypatch.setattr(pipeline.tools, 'extract_f0', f0)
+    job = Job('drain', JobSpec(song_id='1', start=0, end=1, modes=['mimic']))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(job.run)
+        try:
+            assert failed.wait(5)
+            assert job.state.status == 'running'
+            assert not pending.done()
+        finally:
+            release.set()
+        result = pending.result(timeout=5)
+    assert finished.is_set()
+    assert result.status == 'failed' and 'alignment failed' in result.error
 
 
 @pytest.mark.parametrize('modes', [['score'], ['mimic', 'score']])

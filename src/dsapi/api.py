@@ -31,8 +31,9 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import audio, cache, onnx_backend, resolver, settings, sources, tools, voices
-from .pipeline import Job, JobSpec, voicebank, inference_lock
+from . import audio, cache, onnx_backend, resolver, scheduling, settings, sources, tools, voices
+from .pipeline import Job, JobSpec, voicebank
+from .errors import error_info
 from .score import Note, Phrase, Syllable, render_score
 from .score_task import ScoreJob
 from .text_score import ScoreError, parse_score
@@ -60,8 +61,8 @@ def _load_api_keys(raw: str, legacy_key: str) -> dict[str, str]:
 API_KEYS = _load_api_keys(os.environ.get("DSAPI_KEYS", "{}"), API_KEY)
 MAX_LYRIC_TEXT = 16384
 
-# Separation and torch models are memory heavy; run one job at a time.
-_executor = ThreadPoolExecutor(max_workers=1)
+# A bounded number of jobs share stage/model slots; pending jobs stay lightweight.
+_executor = ThreadPoolExecutor(max_workers=settings.ACTIVE_JOBS)
 _prefetch_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="download")
 _jobs: dict[str, Job] = {}
 _job_futures: dict[str, Future] = {}
@@ -71,7 +72,7 @@ _delete_lock = Lock()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _executor, _prefetch_executor
-    _executor = ThreadPoolExecutor(max_workers=1)
+    _executor = ThreadPoolExecutor(max_workers=settings.ACTIVE_JOBS)
     _prefetch_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="download")
     try:
         yield
@@ -248,6 +249,8 @@ def _state(task_id: str, owner: str) -> dict:
     if (state.pop("owner_id", None) or LEGACY_OWNER) != owner:
         raise HTTPException(404, "unknown task")
     state["voice"] = state.get("voice") or dict(voices.LEGACY_VOICE)
+    if state.get("status") == "failed" and not state.get("error_info"):
+        state["error_info"] = error_info(state.get("error") or "", state.get("stage") or "")
     return state
 
 
@@ -320,7 +323,7 @@ class ScoreIn(BaseModel):
 @app.post("/render_score", dependencies=[Depends(auth)])
 def render(body: ScoreIn) -> FileResponse:
     validate_voice(body.voice_id)
-    with inference_lock:
+    with scheduling.scheduler.jobs.enter():
         return _render(body)
 
 
@@ -387,6 +390,7 @@ def delete_task(task_id: str, owner: Owner = LEGACY_OWNER) -> dict:
 @app.get("/runtime", dependencies=[Depends(auth)])
 def runtime() -> dict:
     return {"synthesis": onnx_backend.backend_status(), "workers": tools.worker_status(),
+            "scheduling": scheduling.scheduler.status(),
             "alignment": {lang: tools.alignment_backend(lang) for lang in ("zh", "ja", "en")},
             "note_extraction": {"backend": tools.note_backend(), "game_steps": settings.GAME_STEPS},
             "optimization": {"cache": settings.CACHE_ENABLED, "cache_ttl_seconds": settings.CACHE_TTL,

@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from . import settings
+from . import scheduling, settings
 from .vocal_protection import detect_lead_dropouts
 
 
@@ -41,6 +41,7 @@ def save(path: Path, wav: np.ndarray, *, subtype: str = "PCM_16") -> Path:
     return path
 
 
+@scheduling.stage("encode")
 def to_mp3(src: Path, dst: Path, loudnorm: bool = True) -> Path:
     args = ["-i", str(src)]
     if loudnorm:
@@ -121,6 +122,7 @@ def mix_accompaniment(vocal: Path, instrumental: Path, reference: Path, dst: Pat
 _separators: dict[str, object] = {}
 
 
+@scheduling.stage("separate", gpu=True)
 def _separate(model: str, src: Path, out_dir: Path) -> dict[str, Path]:
     from audio_separator.separator import Separator
 

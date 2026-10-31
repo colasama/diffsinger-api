@@ -175,6 +175,15 @@ alignment report), and `error.txt` on failure.
 | GET | `/v1/audio?task_id=&kind=` | `mimic` / `score` / `lead` / `clip` |
 | POST | `/render_score` | body is `score.json`'s shape; synthesis only |
 
+Failed task responses retain the original `error` string for diagnostics and add
+`error_info` with `code`, `stage`, `context` and `retryable`. Codes are
+`PHONEME_UNSUPPORTED`, `LYRIC_WORD_NOT_FOUND`, `LYRICS_MISSING`,
+`SOURCE_UNAVAILABLE`, `AUDIO_READ_FAILED`, or `UNKNOWN`. Word/phoneme failures
+include `context.word` or `context.phonemes`; newly recorded missing words also
+include the lyric text and time when available. Existing failed jobs are
+classified when queried without rewriting their saved records. Clients should
+use codes for friendly messages and keep raw diagnostics out of chat replies.
+
 Set `DSAPI_KEY` to require `Authorization: Bearer <key>`.
 `/release_task_upload` accepts the same `selection`, `seed`, and `lyric_query` fields as multipart
 form fields. Existing clients that omit them use random lyric selection.
@@ -195,10 +204,12 @@ Clients continue sending `Authorization: Bearer <key>`; the web UI also supports
 
 Each user sees only their own tasks in `/tasks`, and can only query, download,
 evaluate, or delete their own tasks. Other users' task IDs return 404. Uploads
-follow the same rules. All users submit to the **same single-worker FIFO queue**;
-there is no separate execution queue per user. Run one server process/worker to
-retain that global queue. `/render_score` remains a synchronous synthesis endpoint,
-outside the task queue.
+follow the same rules. All users submit to the **same shared queue**, with up to
+three jobs in flight by default. Jobs share model stages and can finish out of
+submission order; there is no separate execution queue per user. Run one server
+process/worker to retain the global resource limits. `/render_score` remains a
+synchronous endpoint outside the background queue, but consumes the same job,
+synthesis and GPU slots.
 
 Task ownership is saved as a user ID, never as an API key, and survives restarts.
 To rotate a user's key, replace the secret while keeping their user ID unchanged.
@@ -248,6 +259,15 @@ uv run python scripts/compare_japanese_alignment.py work/<completed-japanese-tas
 The new task includes both synthesis modes and `comparison.json` with input
 hashes, timings and aligned boundaries. It never overwrites the reference task.
 These diagnostics are not a substitute for listening or hand-labelled timing.
+
+For mixed-language alignment, Chinese units use HubertFA's Mandarin dictionary;
+synthesis retains the imported model's own phonemes. Each Chinese unit records
+its alignment/synthesis correspondence in `segments.json`. Only equal-length,
+verified mappings are accepted (including syllable-specific `y`/`y0` glides to
+`H` and the `yo` vowel variant). The returned phoneme sequence must match that
+mapping before its timestamps are transferred; mismatched counts or unsupported
+substitutions fail explicitly instead of evenly redistributing timing. Pure
+Chinese alignment and English/Japanese pronunciation routes remain unchanged.
 
 Language routing follows each lyric line and its word/script runs, including
 English words embedded in Japanese or Chinese lines. It does not discard Japanese
@@ -303,12 +323,46 @@ Set `DSAPI_CACHE=0` to bypass artifact reuse. The first run must populate the
 cache; historical task directories are not automatically imported.
 
 `DSAPI_PREFETCH=1` allows at most two queued song downloads concurrently with
-the single inference worker; metadata and lyrics are fetched alongside audio.
+the inference pipeline; metadata and lyrics are fetched alongside audio.
 Repeated concurrent downloads of the same owner's song are coalesced. Uploaded
 files use the normal queue. `job.json`/`query_result` include `cache_hits` and
 `metrics` (queue time, fetch work time, F0, GAME, model and reference encoding
 time). Fetch work can happen while queued; its duration is not added to the
 job's elapsed time a second time. `/runtime` reports optimization settings.
+
+### Stage concurrency
+
+`DSAPI_ACTIVE_JOBS=3` bounds jobs in flight and their intermediate audio buffers.
+The remaining background jobs wait without starting their execution clock.
+Each model stage has one slot: separation, alignment, F0, GAME and synthesis.
+Different stages can process different jobs concurrently, reusing the same model
+instances. Separation protects model loading and the mutable output directory;
+synthesis releases its slot between phrases. MP3 encoding has its own single
+slot and can overlap the next inference. The number of jobs waiting between
+stages is bounded by the active-job limit; there is no unbounded intermediate
+stage queue. Shutdown drains jobs and their analysis threads before closing models.
+
+For GAME and audio-only jobs, alignment and F0 extraction run concurrently after
+separation. GAME waits for both results. Progress reports this combined stage as
+`align_f0`; its timing is wall time, while `metrics.align_seconds` and
+`metrics.f0_seconds` measure the individual operations (including resource waits).
+`notes_f0` then measures GAME, or the legacy SOME/F0 operation for SOME jobs.
+Do not add overlapping operation metrics to estimate elapsed time.
+
+`DSAPI_GPU_CONCURRENCY=1` is the conservative default: separation (MPS), HubertFA
+alignment (a child process) and synthesis share one parent-managed GPU budget.
+CPU F0/GAME work and downloads can overlap it. Setting this to `2` or `3` allows
+different GPU stages to overlap for experiments; each model stage still has one
+slot, and native WebGPU calls in each process remain serialized. This may increase
+memory use and GPU contention and is not a measured throughput improvement.
+GPU-eligible stages conservatively reserve a slot even if their backend falls
+back to CPU. CUDA extraction workers also reserve GPU slots.
+
+Restart after changing these positive-integer settings. To limit processing to
+one job at a time, use `DSAPI_ACTIVE_JOBS=1` (alignment/F0 within that job may still
+overlap). `/runtime.scheduling` reports capacities, active reservations and waiting
+counts for jobs, GPU and model stages. A stage reservation can be waiting for GPU;
+these counts are scheduler state, not hardware utilization.
 
 For a faster mimic-only result, send `"modes":["mimic"], "audio_only":true`
 to either task endpoint (multipart uses `modes=mimic`), use the Web UI's

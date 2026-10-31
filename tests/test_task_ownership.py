@@ -118,7 +118,7 @@ def test_invalid_key_configuration_fails_closed(raw):
         api._load_api_keys(raw, "legacy-secret")
 
 
-def test_all_users_share_one_fifo_worker(client, monkeypatch):
+def test_single_worker_configuration_preserves_shared_fifo(client, monkeypatch):
     started, release = Event(), Event()
     order = []
 

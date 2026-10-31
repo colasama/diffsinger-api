@@ -35,6 +35,8 @@ class Bank:
 
 def test_one_alignment_keeps_language_namespaces_and_separates_game_phrases(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, 'HUBERTFA_MODEL', tmp_path/'model.onnx')
+    monkeypatch.setattr(settings, 'HUBERTFA_DICT', tmp_path/'zh.txt')
+    (tmp_path/'zh.txt').write_text('ge\tg e\n')
     (tmp_path/'vocab.json').write_text(json.dumps({'vocab': dict.fromkeys(
         [p for phones in Bank.entries.values() for p in phones], 1)}))
     lines = [lrc.Line(0, 1, 'go', lang='en', _units=[('go', 'go')]),
